@@ -15,6 +15,9 @@ import {
 
 type CliOutput = Pick<Console, 'log' | 'error'>;
 
+const VERIFY_RELEASE_USAGE =
+  'Usage: pe-community-updater verify-release vX.Y.Z [--json] [--output-plan FILE]';
+
 type CliDependencies = {
   releases: ReleaseProvider;
   provenance: ProvenanceVerifier;
@@ -26,11 +29,13 @@ export async function runCli(
   args: readonly string[],
   dependencies: CliDependencies = productionDependencies(),
 ): Promise<number> {
+  if (isHelpRequest(args)) {
+    dependencies.output.log(VERIFY_RELEASE_USAGE);
+    return 0;
+  }
   const parsed = parseVerifyReleaseArgs(args);
   if (!parsed) {
-    dependencies.output.error(
-      'Usage: pe-community-updater verify-release vX.Y.Z [--json] [--output-plan FILE]',
-    );
+    dependencies.output.error(VERIFY_RELEASE_USAGE);
     return 64;
   }
   try {
@@ -54,6 +59,16 @@ export async function runCli(
     );
     return 1;
   }
+}
+
+function isHelpRequest(args: readonly string[]) {
+  const help = new Set(['--help', '-h', 'help']);
+  return (
+    (args.length === 1 && help.has(args[0] ?? '')) ||
+    (args.length === 2 &&
+      args[0] === 'verify-release' &&
+      help.has(args[1] ?? ''))
+  );
 }
 
 function productionDependencies(): CliDependencies {

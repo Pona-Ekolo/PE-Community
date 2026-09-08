@@ -53,6 +53,26 @@ test('verify-release reports only authenticated immutable release metadata', asy
   assert.equal(output.errors.length, 0);
 });
 
+test('verify-release help is available without release configuration', async () => {
+  const output = outputCollector();
+  for (const args of [['--help'], ['verify-release', '--help']] as const) {
+    assert.equal(
+      await runCli(args, {
+        releases: rejectingReleaseProvider('UNEXPECTED_RELEASE_LOOKUP'),
+        provenance: provenanceVerifier('UNEXPECTED_PROVENANCE_LOOKUP'),
+        output,
+        writePlan: noPlanWrite,
+      }),
+      0,
+    );
+  }
+  assert.equal(output.errors.length, 0);
+  assert.deepEqual(output.lines, [
+    'Usage: pe-community-updater verify-release vX.Y.Z [--json] [--output-plan FILE]',
+    'Usage: pe-community-updater verify-release vX.Y.Z [--json] [--output-plan FILE]',
+  ]);
+});
+
 test('verify-release produces a Compose override that consumes exact authenticated digests', async () => {
   const output = outputCollector();
   let plan = '';
