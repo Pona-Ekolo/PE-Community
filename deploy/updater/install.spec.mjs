@@ -260,6 +260,16 @@ test('installer has bounded stable release selection and does not perform an app
   assert.doesNotMatch(installer, /pull|up -d(?! --no-deps api)/);
 });
 
+test('installed updater package remains root-protected and normally executable', () => {
+  assert.match(installer, /chown -R root:root "\$install_root\.next"/);
+  assert.match(installer, /chmod -R go-w "\$install_root\.next"/);
+  assert.match(
+    installer,
+    /chmod 0755 "\$install_root\.next" "\$install_root\.next\/bin" "\$install_root\.next\/bin\/pe-community-updater" "\$install_root\.next\/bin\/gh"/,
+  );
+  assert.match(installer, /dist\/cli\.js/);
+});
+
 test('operator guidance keeps updater package selection separate from the application version', () => {
   assert.match(
     operatorGuide,

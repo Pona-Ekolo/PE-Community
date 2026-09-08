@@ -266,7 +266,7 @@ jobs:
             cp "$extract_root/LICENSE" pe-community-updater/LICENSES/github-cli-MIT.txt
             cp deploy/updater/README.md deploy/updater/SECURITY.md deploy/updater/pe-community-updater.env.example deploy/updater/pe-community-updater.service deploy/updater/docker-compose.updater.yml deploy/updater/install.sh pe-community-updater/deploy/
             chmod 0755 pe-community-updater/deploy/install.sh
-            printf '%s\n' '#!/bin/sh' 'set -eu' 'root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)' 'exec node "$root/dist/server.js"' > pe-community-updater/bin/pe-community-updater
+            cp deploy/updater/pe-community-updater pe-community-updater/bin/pe-community-updater
             chmod 0755 pe-community-updater/bin/pe-community-updater
             updater="pe-community-updater-${BUILD_VERSION}-${architecture}.tar.gz"
             tar --owner=0 --group=0 --numeric-owner --mode='u=rwX,go=rX' -czf "$updater" pe-community-updater

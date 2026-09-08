@@ -52,6 +52,7 @@ test('updater bundle inventory requires the embedded verifier and license', () =
   const entries = [
     'pe-community-updater/bin/pe-community-updater',
     'pe-community-updater/bin/gh',
+    'pe-community-updater/dist/cli.js',
     'pe-community-updater/dist/server.js',
     'pe-community-updater/package.json',
     'pe-community-updater/LICENSES/github-cli-MIT.txt',

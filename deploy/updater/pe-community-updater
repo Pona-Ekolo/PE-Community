@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+if [ "${1-}" = verify-release ]; then
+  exec node "$root/dist/cli.js" "$@"
+fi
+exec node "$root/dist/server.js"

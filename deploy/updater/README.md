@@ -26,6 +26,23 @@ sudo ./deploy/updater/install.sh --project-dir /path/to/pe-community --version v
 
 The package carries its pinned `gh` verifier at `<updater-root>/bin/gh`. Runtime resolution is relative to the installed package; the updater never uses a host `gh` from `PATH`.
 
+## Legacy production cutover verification
+
+An installation still running v1.2.3 needs one manual application cutover because its running API predates the portable updater release contract. Before that host-changing work, an ordinary local operator can verify a published release without `sudo`, Docker access, systemd access, the updater socket, or the updater shared secret:
+
+```bash
+.pe/updater/bin/pe-community-updater verify-release v1.2.7
+```
+
+The command uses the root-owned, non-writable bundled `gh` executable from the installed updater package. It verifies the authenticated release manifest and the immutable API, Web, and Worker image attestations against the fixed PE Community repository, workflow, release tag, and source commit policy. `--json` emits only the authenticated release metadata and image digests. An explicit plan file is available for the later Compose deployment step:
+
+```bash
+.pe/updater/bin/pe-community-updater verify-release v1.2.7 \
+  --output-plan /tmp/pe-community-v1.2.7-images.compose.yml
+```
+
+The generated plan contains only digest-pinned `repository@sha256:...` image references. It does not pull images, contact the updater socket, modify application files, run migrations, create backups, or start services. The later cutover commands may require the host privileges appropriate to the installation's Docker model. Once v1.2.7 is running, use **Settings → System Updates** for normal future updates.
+
 ## First portable updater release notes
 
 Portable updater bootstrap is available for Linux amd64 and arm64. Existing installations can install the host updater without changing their current PE Community application version. After bootstrap, an Owner uses **Settings → System Updates** to check and approve later application updates. The API is the only application component that can reach the updater over authenticated Unix IPC; application containers do not receive the Docker socket. Each updater archive includes the bundled GitHub CLI verifier and required operator/support files.

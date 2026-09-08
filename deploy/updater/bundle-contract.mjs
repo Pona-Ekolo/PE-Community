@@ -52,6 +52,7 @@ export function verifyBundleEntries(entries) {
   const required = new Set([
     'pe-community-updater/bin/pe-community-updater',
     'pe-community-updater/bin/gh',
+    'pe-community-updater/dist/cli.js',
     'pe-community-updater/dist/server.js',
     'pe-community-updater/package.json',
     'pe-community-updater/LICENSES/github-cli-MIT.txt',

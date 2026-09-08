@@ -173,7 +173,7 @@ install_bundle() {
   tar -xzf "$archive" -C "$stage" || fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
   package="$stage/pe-community-updater"
   entries=$(tar -tzf "$archive") || fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
-  printf '%s\n' "$entries" | grep -Eq '^pe-community-updater/(bin/pe-community-updater|bin/gh|dist/server.js|deploy/install.sh)$' || fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
+  printf '%s\n' "$entries" | grep -Eq '^pe-community-updater/(bin/pe-community-updater|bin/gh|dist/cli.js|dist/server.js|deploy/install.sh)$' || fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
   printf '%s\n' "$entries" | grep -Eq '(^/|(^|/)\.\.(/|$))' && fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
   [ -f "$package/bin/pe-community-updater" ] || fail_code UPDATER_BUNDLE_INVALID 'Updater package is invalid.'
   validate_bundled_gh_elf "$package/bin/gh" "$target_arch"
@@ -185,6 +185,7 @@ install_bundle() {
   mv "$package" "$install_root.next"
   chown -R root:root "$install_root.next"
   chmod -R go-w "$install_root.next"
+  chmod 0755 "$install_root.next" "$install_root.next/bin" "$install_root.next/bin/pe-community-updater" "$install_root.next/bin/gh"
   if [ -d "$install_root" ]; then rm -rf "$install_root.previous"; mv "$install_root" "$install_root.previous"; fi
   mv "$install_root.next" "$install_root"
   printf '%s\n' "$install_root"

@@ -24,6 +24,7 @@ import {
   ProvenanceError,
   type ProvenanceVerifier,
 } from './provenance.js';
+import { verifyManifestImage } from './release-verifier.js';
 import type { ReleaseProvider } from './release.js';
 import { AgentStore } from './store.js';
 
@@ -334,13 +335,7 @@ export class UpdaterAgent {
       const digests = JSON.parse(inspected.stdout) as string[];
       if (!digests.includes(`${repository}@${manifest.images[service].digest}`)) throw new AgentError(`DIGEST_MISMATCH_${service.toUpperCase()}`);
       try {
-        const result = await this.provenance.verify({
-          service,
-          repository,
-          digest: manifest.images[service].digest,
-          releaseTag: manifest.releaseTag,
-          sourceCommit: manifest.sourceCommit,
-        });
+        const result = await verifyManifestImage(manifest, service, this.provenance, this.imageRepositories);
         run.provenanceResults = [...run.provenanceResults, result];
         await this.store.saveRun(run);
         await this.log(run, 'SUCCESS', 'SYSTEM_UPDATE_PROVENANCE_VERIFIED', `${service.toUpperCase()} release provenance verified.`);
