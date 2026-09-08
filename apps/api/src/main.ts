@@ -4,7 +4,12 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import { mkdirSync } from 'fs';
 import { AppModule } from './app.module';
-import { avatarUploadDir, eventImageUploadDir, publicationCoverUploadDir } from './uploads';
+import {
+  avatarUploadDir,
+  eventImageUploadDir,
+  publicationCoverUploadDir,
+} from './uploads';
+import { csrfOriginProtection } from './security/csrf-origin';
 import { trustedProxy } from './security/security-request-context';
 
 async function bootstrap() {
@@ -32,6 +37,7 @@ async function bootstrap() {
     index: false,
   });
   app.use(cookieParser());
+  app.use(csrfOriginProtection);
   app.enableCors({
     origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
     credentials: true,

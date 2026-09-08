@@ -11,10 +11,32 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { AuthService, RequestUser } from '../auth/auth.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { attachRealtimeTransportDiagnostics, realtimeDiagnostic } from '../realtime-diagnostics';
+import {
+  attachRealtimeTransportDiagnostics,
+  realtimeDiagnostic,
+} from '../realtime-diagnostics';
+import {
+  configuredWebOrigin,
+  requestOriginMatches,
+} from '../security/csrf-origin';
 import { realtimeSessionRegistry } from '../auth/realtime-session-registry';
 
-export type EventTaskChangeReason = 'created' | 'updated' | 'moved' | 'reordered' | 'archived' | 'member-status-updated' | 'comment-added' | 'comment-archived' | 'attachment-added' | 'attachment-archived' | 'checklist-added' | 'checklist-updated' | 'checklist-toggled' | 'checklist-archived' | 'checklist-reordered';
+export type EventTaskChangeReason =
+  | 'created'
+  | 'updated'
+  | 'moved'
+  | 'reordered'
+  | 'archived'
+  | 'member-status-updated'
+  | 'comment-added'
+  | 'comment-archived'
+  | 'attachment-added'
+  | 'attachment-archived'
+  | 'checklist-added'
+  | 'checklist-updated'
+  | 'checklist-toggled'
+  | 'checklist-archived'
+  | 'checklist-reordered';
 
 export type EventTaskChangedPayload = {
   eventId: string;
@@ -42,8 +64,15 @@ type EventTaskRoomPayload = {
     origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
     credentials: true,
   },
+  allowRequest: (request, callback) =>
+    callback(
+      null,
+      requestOriginMatches(request.headers.origin, configuredWebOrigin()),
+    ),
 })
-export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class EventTasksRealtimeGateway
+  implements OnGatewayConnection, OnGatewayDisconnect
+{
   private readonly logger = new Logger(EventTasksRealtimeGateway.name);
 
   @WebSocketServer()
@@ -55,11 +84,20 @@ export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGateway
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
-    const sessionCookie = cookieValue(client.handshake.headers.cookie, this.auth.cookieName);
+    const sessionCookie = cookieValue(
+      client.handshake.headers.cookie,
+      this.auth.cookieName,
+    );
     attachRealtimeTransportDiagnostics(this.logger, 'event-tasks', client);
-    realtimeDiagnostic(this.logger, 'event-tasks', client, 'namespace-authentication-started', {
-      cookiePresent: Boolean(sessionCookie),
-    });
+    realtimeDiagnostic(
+      this.logger,
+      'event-tasks',
+      client,
+      'namespace-authentication-started',
+      {
+        cookiePresent: Boolean(sessionCookie),
+      },
+    );
     const authentication = this.auth.userFromCookie(sessionCookie);
     client.data.authentication = authentication;
     try {
@@ -70,11 +108,22 @@ export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGateway
         disconnect: () => client.disconnect(true),
       });
       client.data.joinedEventTaskIds = new Set<string>();
-      realtimeDiagnostic(this.logger, 'event-tasks', client, 'namespace-authentication-accepted');
+      realtimeDiagnostic(
+        this.logger,
+        'event-tasks',
+        client,
+        'namespace-authentication-accepted',
+      );
     } catch {
-      realtimeDiagnostic(this.logger, 'event-tasks', client, 'namespace-authentication-rejected', {
-        category: 'invalid-session',
-      });
+      realtimeDiagnostic(
+        this.logger,
+        'event-tasks',
+        client,
+        'namespace-authentication-rejected',
+        {
+          category: 'invalid-session',
+        },
+      );
       client.emit('event.tasks.error', { code: 'unauthorized' });
       client.disconnect(true);
     }
@@ -85,17 +134,25 @@ export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGateway
   }
 
   @SubscribeMessage('event.tasks.join')
-  async joinEventTasks(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: EventTaskRoomPayload) {
+  async joinEventTasks(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: EventTaskRoomPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const eventId = stringValue(payload?.eventId);
-    if (!eventId) return client.emit('event.tasks.error', { code: 'invalid_payload' });
+    if (!eventId)
+      return client.emit('event.tasks.error', { code: 'invalid_payload' });
 
     const event = await this.prisma.event.findFirst({
       where: { id: eventId, communityId: user.communityId },
       select: { id: true },
     });
-    if (!event) return client.emit('event.tasks.error', { code: 'access_denied', eventId });
+    if (!event)
+      return client.emit('event.tasks.error', {
+        code: 'access_denied',
+        eventId,
+      });
 
     await client.join(eventTaskRoom(user.communityId, eventId));
     (client.data.joinedEventTaskIds ??= new Set<string>()).add(eventId);
@@ -103,7 +160,10 @@ export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGateway
   }
 
   @SubscribeMessage('event.tasks.leave')
-  async leaveEventTasks(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: EventTaskRoomPayload) {
+  async leaveEventTasks(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: EventTaskRoomPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const eventId = stringValue(payload?.eventId);
@@ -113,7 +173,9 @@ export class EventTasksRealtimeGateway implements OnGatewayConnection, OnGateway
   }
 
   emitTaskChanged(payload: EventTaskChangedPayload) {
-    this.server.to(eventTaskRoom(payload.communityId, payload.eventId)).emit('event.tasks.changed', payload);
+    this.server
+      .to(eventTaskRoom(payload.communityId, payload.eventId))
+      .emit('event.tasks.changed', payload);
   }
 
   private async userOrDisconnect(client: AuthenticatedSocket) {
@@ -154,6 +216,9 @@ function stringValue(value: unknown) {
 function cookieValue(header: string | undefined, name: string) {
   if (!header) return undefined;
   const prefix = `${name}=`;
-  const cookie = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  const cookie = header
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : undefined;
 }

@@ -11,11 +11,7 @@ PE Community is a self-hosted workspace for operating a private community. It br
 
 <img width="957" height="473" alt="pe-admin-dashboard-light" src="https://github.com/user-attachments/assets/ac2a557a-a14c-4f42-bc94-36d9afa447ea" />
 
-
 <img width="957" height="473" alt="pe-admin-dashboard-light" src="https://github.com/user-attachments/assets/f194a6c7-d528-4abd-9664-0f11b95e8841" />
-
-
-
 
 ## Overview
 
@@ -59,17 +55,16 @@ Discussion is PE Community's integrated communication space for everyday collabo
 
 <img width="1064" height="616" alt="chat-preview-en" src="https://github.com/user-attachments/assets/5a3f53a1-5fc3-4acf-a298-5306f4ee87c9" />
 
-
 ### Designed for everyday communication
 
-| Capability | What it provides |
-| --- | --- |
-| Direct and group conversations | Private individual discussions and shared spaces for teams, projects, or community groups. |
-| Realtime interaction | Live messages, typing indicators, reactions, delivery updates, and automatic reconnection when connectivity returns. |
-| Encrypted messages and files | Browser-side encryption for text and supported media, images, and documents before normal transport and storage. Direct conversations can also use view-once images. |
-| Conversation organization | Unread counts, conversation search, All / Unread / Groups / Favourites filters, and local pinning for quick access. |
-| Presence and activity | Online status and last-seen information help participants understand when others are available. |
-| Secure recovery | Password-protected encrypted key backups can restore applicable encrypted history on another supported browser or device. |
+| Capability                     | What it provides                                                                                                                                                     |
+| ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direct and group conversations | Private individual discussions and shared spaces for teams, projects, or community groups.                                                                           |
+| Realtime interaction           | Live messages, typing indicators, reactions, delivery updates, and automatic reconnection when connectivity returns.                                                 |
+| Encrypted messages and files   | Browser-side encryption for text and supported media, images, and documents before normal transport and storage. Direct conversations can also use view-once images. |
+| Conversation organization      | Unread counts, conversation search, All / Unread / Groups / Favourites filters, and local pinning for quick access.                                                  |
+| Presence and activity          | Online status and last-seen information help participants understand when others are available.                                                                      |
+| Secure recovery                | Password-protected encrypted key backups can restore applicable encrypted history on another supported browser or device.                                            |
 
 The workspace also includes familiar message controls such as replies, reactions, editing, personal stars, and participant-scoped clear or delete actions. These tools keep active conversations manageable while preserving the privacy boundary between participants.
 
@@ -100,7 +95,6 @@ Restoring a backup does not automatically grant permission to send. The new brow
 
 `Socket.IO` keeps active conversations synchronized and reconnects the selected discussion when connectivity returns. PE Community waits for server acknowledgement before treating an encrypted message as successfully sent, so a timeout, lost connection, or authorization problem appears as a visible error rather than a silent failure.
 
-
 ## Task Boards
 
 ## Organize work from planning to completion
@@ -111,19 +105,18 @@ Boards can be linked to events or created as standalone planning records. Event-
 
 <img width="1052" height="617" alt="task-boards-preview" src="https://github.com/user-attachments/assets/5063fdde-2b8b-4732-ad9b-9841688b0f65" />
 
-
 ### What Task Boards provide
 
-| Capability | What it provides |
-| --- | --- |
-| Board overview | Readiness, task progress, checklist completion, workload, recent collaboration, and items needing attention |
-| Task workflow | To do, in progress, and done columns with ordering and status movement |
-| Responsibility | Multiple assignees, unassigned-task visibility, workload summaries, and member-specific views |
-| Planning detail | Low, medium, or high priority; labels; descriptions; due dates; checklists; comments; and attachments |
-| Discovery | Search, visibility and linkage filters, status views, sorting, and pagination |
-| Lifecycle | Active, paused, and completed boards, with reopening and controlled archival |
-| Collaboration | Realtime task refreshes plus a recorded activity trail for meaningful task changes |
-| Localization | Complete English and French interface support |
+| Capability      | What it provides                                                                                            |
+| --------------- | ----------------------------------------------------------------------------------------------------------- |
+| Board overview  | Readiness, task progress, checklist completion, workload, recent collaboration, and items needing attention |
+| Task workflow   | To do, in progress, and done columns with ordering and status movement                                      |
+| Responsibility  | Multiple assignees, unassigned-task visibility, workload summaries, and member-specific views               |
+| Planning detail | Low, medium, or high priority; labels; descriptions; due dates; checklists; comments; and attachments       |
+| Discovery       | Search, visibility and linkage filters, status views, sorting, and pagination                               |
+| Lifecycle       | Active, paused, and completed boards, with reopening and controlled archival                                |
+| Collaboration   | Realtime task refreshes plus a recorded activity trail for meaningful task changes                          |
+| Localization    | Complete English and French interface support                                                               |
 
 ### Reusable task templates
 
@@ -144,7 +137,6 @@ Automation rules connect a verified trigger to a focused action. Current rule ty
 Rules can target assignees and, where configured, administrators. Delivery supports in-app notifications and optional email. Administrators can preview and apply reusable automation presets, validate rule configuration, keep drafts, publish changes, review version history, roll back a version, archive or restore a rule, inspect schedules, test notifications, and review run results. Run history distinguishes successful, skipped, and failed outcomes, while dry runs and test notifications support safer changes.
 
 <img width="1064" height="620" alt="automation-preview" src="https://github.com/user-attachments/assets/224159f7-d342-4103-9333-6d7373a661b2" />
-
 
 ### Assignment, priority, and progress
 
@@ -189,7 +181,7 @@ Treat JWT secrets, password peppers, encryption keys, database credentials, setu
 
 ## First-Run Setup
 
-On an unconfigured installation, open the application and follow the guided setup to create the community, defaults, email settings, and initial Owner account. The setup endpoint closes after successful completion.
+On an unconfigured installation, set a strong secret `SETUP_TOKEN` before starting production setup, then follow the guided flow to create the community, defaults, email settings, and initial Owner account. Keep the token private; after setup closes successfully it can be cleared or rotated because the setup endpoint is no longer available.
 
 ## Security
 

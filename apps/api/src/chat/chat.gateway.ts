@@ -11,7 +11,14 @@ import {
 import { HttpException, Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { AuthService, RequestUser } from '../auth/auth.service';
-import { attachRealtimeTransportDiagnostics, realtimeDiagnostic } from '../realtime-diagnostics';
+import {
+  attachRealtimeTransportDiagnostics,
+  realtimeDiagnostic,
+} from '../realtime-diagnostics';
+import {
+  configuredWebOrigin,
+  requestOriginMatches,
+} from '../security/csrf-origin';
 import { ChatService } from './chat.service';
 import { realtimeSessionRegistry } from '../auth/realtime-session-registry';
 
@@ -63,6 +70,11 @@ type ReactionPayload = MessageActionPayload & {
     origin: process.env.WEB_ORIGIN ?? 'http://localhost:3000',
     credentials: true,
   },
+  allowRequest: (request, callback) =>
+    callback(
+      null,
+      requestOriginMatches(request.headers.origin, configuredWebOrigin()),
+    ),
 })
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(ChatGateway.name);
@@ -71,7 +83,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly server!: Server;
 
   private readonly userSockets = new Map<string, Set<string>>();
-  private readonly typingTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly typingTimers = new Map<
+    string,
+    ReturnType<typeof setTimeout>
+  >();
 
   constructor(
     private readonly auth: AuthService,
@@ -79,11 +94,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {}
 
   async handleConnection(client: AuthenticatedSocket) {
-    const sessionCookie = cookieValue(client.handshake.headers.cookie, this.auth.cookieName);
+    const sessionCookie = cookieValue(
+      client.handshake.headers.cookie,
+      this.auth.cookieName,
+    );
     attachRealtimeTransportDiagnostics(this.logger, 'chat', client);
-    realtimeDiagnostic(this.logger, 'chat', client, 'namespace-authentication-started', {
-      cookiePresent: Boolean(sessionCookie),
-    });
+    realtimeDiagnostic(
+      this.logger,
+      'chat',
+      client,
+      'namespace-authentication-started',
+      {
+        cookiePresent: Boolean(sessionCookie),
+      },
+    );
     const authentication = this.auth.userFromCookie(sessionCookie);
     client.data.authentication = authentication;
     try {
@@ -98,12 +122,26 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       const sockets = this.userSockets.get(user.id) ?? new Set<string>();
       sockets.add(client.id);
       this.userSockets.set(user.id, sockets);
-      realtimeDiagnostic(this.logger, 'chat', client, 'namespace-authentication-accepted');
+      realtimeDiagnostic(
+        this.logger,
+        'chat',
+        client,
+        'namespace-authentication-accepted',
+      );
     } catch {
-      realtimeDiagnostic(this.logger, 'chat', client, 'namespace-authentication-rejected', {
-        category: 'invalid-session',
+      realtimeDiagnostic(
+        this.logger,
+        'chat',
+        client,
+        'namespace-authentication-rejected',
+        {
+          category: 'invalid-session',
+        },
+      );
+      client.emit('chat:error', {
+        code: 'unauthorized',
+        message: 'Authentication required.',
       });
-      client.emit('chat:error', { code: 'unauthorized', message: 'Authentication required.' });
       client.disconnect(true);
     }
   }
@@ -129,36 +167,53 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     for (const conversationId of client.data.joinedConversationIds ?? []) {
       this.clearTyping(client.id, conversationId);
       if (!this.userSockets.has(user.id)) {
-        this.server.to(conversationRoom(conversationId)).emit('presence:update', {
-          conversationId,
-          userId: user.id,
-          isOnline: false,
-          lastSeenAt: (lastSeenAt ?? new Date()).toISOString(),
-        });
+        this.server
+          .to(conversationRoom(conversationId))
+          .emit('presence:update', {
+            conversationId,
+            userId: user.id,
+            isOnline: false,
+            lastSeenAt: (lastSeenAt ?? new Date()).toISOString(),
+          });
       }
     }
   }
 
   @SubscribeMessage('chat:conversation:join')
-  async joinConversation(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: ConversationPayload) {
+  async joinConversation(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: ConversationPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
-    if (!conversationId) return this.safeError(client, 'invalid_payload', 'Conversation is required.');
+    if (!conversationId)
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation is required.',
+      );
     try {
       await this.chat.ensureParticipant(user, conversationId);
       await client.join(conversationRoom(conversationId));
       client.data.joinedConversationIds?.add(conversationId);
-      const participantPresence = await this.chat.conversationPresenceSnapshot(user, conversationId);
-      participantPresence.filter((presence) => presence.userId !== user.id).forEach((presence) => {
-        const isOnline = this.userSockets.has(presence.userId);
-        client.emit('presence:update', {
-          conversationId,
-          userId: presence.userId,
-          isOnline,
-          lastSeenAt: isOnline ? null : presence.lastSeenAt?.toISOString() ?? null,
+      const participantPresence = await this.chat.conversationPresenceSnapshot(
+        user,
+        conversationId,
+      );
+      participantPresence
+        .filter((presence) => presence.userId !== user.id)
+        .forEach((presence) => {
+          const isOnline = this.userSockets.has(presence.userId);
+          client.emit('presence:update', {
+            conversationId,
+            userId: presence.userId,
+            isOnline,
+            lastSeenAt: isOnline
+              ? null
+              : (presence.lastSeenAt?.toISOString() ?? null),
+          });
         });
-      });
       client.emit('chat:conversation:joined', { conversationId });
       client.to(conversationRoom(conversationId)).emit('presence:update', {
         conversationId,
@@ -167,12 +222,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         lastSeenAt: null,
       });
     } catch {
-      this.safeError(client, 'access_denied', 'Conversation access denied.', conversationId);
+      this.safeError(
+        client,
+        'access_denied',
+        'Conversation access denied.',
+        conversationId,
+      );
     }
   }
 
   @SubscribeMessage('chat:conversation:leave')
-  async leaveConversation(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: ConversationPayload) {
+  async leaveConversation(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: ConversationPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
@@ -205,7 +268,12 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
     if (!client.data.joinedConversationIds?.has(conversationId)) {
-      this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
       ack?.({ error: 'conversation_not_joined' });
       return;
     }
@@ -218,23 +286,37 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         senderKeyVersionId: payload.senderKeyVersionId,
         recipientKeyVersionId: payload.recipientKeyVersionId,
       });
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:new', message);
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:new', message);
       ack?.({ message });
     } catch (error) {
       const code = safeMessageSendErrorCode(error);
-      this.safeError(client, 'message_rejected', 'Encrypted message could not be sent.');
+      this.safeError(
+        client,
+        'message_rejected',
+        'Encrypted message could not be sent.',
+      );
       ack?.({ error: code });
     }
   }
 
   @SubscribeMessage('chat:typing:start')
-  async typingStart(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: ConversationPayload) {
+  async typingStart(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: ConversationPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
     if (!conversationId) return;
     if (!client.data.joinedConversationIds?.has(conversationId)) {
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
       await this.chat.ensureParticipant(user, conversationId);
@@ -245,12 +327,20 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       });
       this.scheduleTypingStop(client, conversationId);
     } catch {
-      this.safeError(client, 'access_denied', 'Conversation access denied.', conversationId);
+      this.safeError(
+        client,
+        'access_denied',
+        'Conversation access denied.',
+        conversationId,
+      );
     }
   }
 
   @SubscribeMessage('chat:typing:stop')
-  async typingStop(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: ConversationPayload) {
+  async typingStop(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: ConversationPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
@@ -270,129 +360,240 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('chat:message:seen')
-  async messageSeen(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: SeenPayload) {
+  async messageSeen(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: SeenPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
-    if (!conversationId) return this.safeError(client, 'invalid_payload', 'Conversation is required.');
+    if (!conversationId)
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation is required.',
+      );
     if (!client.data.joinedConversationIds?.has(conversationId)) {
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
       const seen = await this.chat.markSeen(user, conversationId);
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:seen', {
-        ...seen,
-        messageId: stringValue(payload.messageId) || null,
-      });
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:seen', {
+          ...seen,
+          messageId: stringValue(payload.messageId) || null,
+        });
     } catch {
       this.safeError(client, 'access_denied', 'Conversation access denied.');
     }
   }
 
   @SubscribeMessage('chat:message:delivered')
-  async messageDelivered(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: SeenPayload) {
+  async messageDelivered(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: SeenPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
     const messageId = stringValue(payload?.messageId);
-    if (!conversationId || !messageId) return this.safeError(client, 'invalid_payload', 'Conversation and message are required.');
+    if (!conversationId || !messageId)
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation and message are required.',
+      );
     if (!client.data.joinedConversationIds?.has(conversationId)) {
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
-      const delivered = await this.chat.markDelivered(user, conversationId, messageId);
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:delivered', delivered);
+      const delivered = await this.chat.markDelivered(
+        user,
+        conversationId,
+        messageId,
+      );
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:delivered', delivered);
     } catch {
       this.safeError(client, 'access_denied', 'Conversation access denied.');
     }
   }
 
   @SubscribeMessage('chat:message:delete-for-everyone')
-  async deleteMessageForEveryone(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: MessageActionPayload) {
+  async deleteMessageForEveryone(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: MessageActionPayload,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
     const messageId = stringValue(payload?.messageId);
-    if (!conversationId || !messageId) return this.safeError(client, 'invalid_payload', 'Conversation and message are required.');
+    if (!conversationId || !messageId)
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation and message are required.',
+      );
     if (!client.data.joinedConversationIds?.has(conversationId)) {
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
-      const { message } = await this.chat.deleteMessageForEveryone(user, conversationId, messageId);
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:deleted', message);
+      const { message } = await this.chat.deleteMessageForEveryone(
+        user,
+        conversationId,
+        messageId,
+      );
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:deleted', message);
     } catch {
-      this.safeError(client, 'message_delete_rejected', 'Message could not be deleted.');
+      this.safeError(
+        client,
+        'message_delete_rejected',
+        'Message could not be deleted.',
+      );
     }
   }
 
   @SubscribeMessage('chat:message:edit')
-  async editMessage(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: EditMessagePayload, @Ack() ack?: (response: { message?: unknown; error?: string }) => void) {
+  async editMessage(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: EditMessagePayload,
+    @Ack() ack?: (response: { message?: unknown; error?: string }) => void,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
     const messageId = stringValue(payload?.messageId);
     if (!conversationId || !messageId) {
       ack?.({ error: 'invalid_payload' });
-      return this.safeError(client, 'invalid_payload', 'Conversation and message are required.');
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation and message are required.',
+      );
     }
     if (!client.data.joinedConversationIds?.has(conversationId)) {
       ack?.({ error: 'conversation_not_joined' });
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
-      const { message } = await this.chat.editMessage(user, conversationId, messageId, {
-        encryptedPayload: payload.encryptedPayload,
-        encryptionNonce: payload.encryptionNonce,
-        encryptionAlgorithmVersion: payload.encryptionAlgorithmVersion,
-        encryptionKeyVersion: payload.encryptionKeyVersion,
-        senderKeyVersionId: payload.senderKeyVersionId,
-        recipientKeyVersionId: payload.recipientKeyVersionId,
-      });
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:edited', message);
+      const { message } = await this.chat.editMessage(
+        user,
+        conversationId,
+        messageId,
+        {
+          encryptedPayload: payload.encryptedPayload,
+          encryptionNonce: payload.encryptionNonce,
+          encryptionAlgorithmVersion: payload.encryptionAlgorithmVersion,
+          encryptionKeyVersion: payload.encryptionKeyVersion,
+          senderKeyVersionId: payload.senderKeyVersionId,
+          recipientKeyVersionId: payload.recipientKeyVersionId,
+        },
+      );
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:edited', message);
       ack?.({ message });
     } catch {
       ack?.({ error: 'message_edit_rejected' });
-      this.safeError(client, 'message_edit_rejected', 'Message could not be edited.');
+      this.safeError(
+        client,
+        'message_edit_rejected',
+        'Message could not be edited.',
+      );
     }
   }
 
   @SubscribeMessage('chat:message:reaction')
-  async setMessageReaction(@ConnectedSocket() client: AuthenticatedSocket, @MessageBody() payload: ReactionPayload, @Ack() ack?: (response: { reaction?: unknown; error?: string }) => void) {
+  async setMessageReaction(
+    @ConnectedSocket() client: AuthenticatedSocket,
+    @MessageBody() payload: ReactionPayload,
+    @Ack() ack?: (response: { reaction?: unknown; error?: string }) => void,
+  ) {
     const user = await this.userOrDisconnect(client);
     if (!user) return;
     const conversationId = stringValue(payload?.conversationId);
     const messageId = stringValue(payload?.messageId);
     if (!conversationId || !messageId) {
       ack?.({ error: 'invalid_payload' });
-      return this.safeError(client, 'invalid_payload', 'Conversation and message are required.');
+      return this.safeError(
+        client,
+        'invalid_payload',
+        'Conversation and message are required.',
+      );
     }
     if (!client.data.joinedConversationIds?.has(conversationId)) {
       ack?.({ error: 'conversation_not_joined' });
-      return this.safeError(client, 'conversation_not_joined', 'Conversation is not connected.', conversationId);
+      return this.safeError(
+        client,
+        'conversation_not_joined',
+        'Conversation is not connected.',
+        conversationId,
+      );
     }
     try {
-      const reaction = await this.chat.setMessageReaction(user, conversationId, messageId, { emoji: payload.emoji });
-      this.server.to(conversationRoom(conversationId)).emit('chat:message:reaction', reaction);
+      const reaction = await this.chat.setMessageReaction(
+        user,
+        conversationId,
+        messageId,
+        { emoji: payload.emoji },
+      );
+      this.server
+        .to(conversationRoom(conversationId))
+        .emit('chat:message:reaction', reaction);
       ack?.({ reaction });
     } catch {
       ack?.({ error: 'message_reaction_rejected' });
-      this.safeError(client, 'message_reaction_rejected', 'Reaction could not be saved.');
+      this.safeError(
+        client,
+        'message_reaction_rejected',
+        'Reaction could not be saved.',
+      );
     }
   }
 
-  private scheduleTypingStop(client: AuthenticatedSocket, conversationId: string) {
+  private scheduleTypingStop(
+    client: AuthenticatedSocket,
+    conversationId: string,
+  ) {
     this.clearTyping(client.id, conversationId);
     const key = typingKey(client.id, conversationId);
-    this.typingTimers.set(key, setTimeout(() => {
-      const user = client.data.user;
-      if (!user) return;
-      this.typingTimers.delete(key);
-      client.to(conversationRoom(conversationId)).emit('chat:typing:update', {
-        conversationId,
-        userId: user.id,
-        isTyping: false,
-      });
-    }, 5000));
+    this.typingTimers.set(
+      key,
+      setTimeout(() => {
+        const user = client.data.user;
+        if (!user) return;
+        this.typingTimers.delete(key);
+        client.to(conversationRoom(conversationId)).emit('chat:typing:update', {
+          conversationId,
+          userId: user.id,
+          isTyping: false,
+        });
+      }, 5000),
+    );
   }
 
   private clearTyping(socketId: string, conversationId: string) {
@@ -424,15 +625,26 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     } catch {
       // The connection handler owns the authentication rejection response.
     }
-    realtimeDiagnostic(this.logger, 'chat', client, 'server-disconnect-requested', {
-      category: 'authentication-rejected',
-    });
+    realtimeDiagnostic(
+      this.logger,
+      'chat',
+      client,
+      'server-disconnect-requested',
+      {
+        category: 'authentication-rejected',
+      },
+    );
     this.safeError(client, 'unauthorized', 'Authentication required.');
     client.disconnect(true);
     return null;
   }
 
-  private safeError(client: Socket, code: string, message: string, conversationId?: string) {
+  private safeError(
+    client: Socket,
+    code: string,
+    message: string,
+    conversationId?: string,
+  ) {
     client.emit('chat:error', { code, message, conversationId });
   }
 }
@@ -452,18 +664,24 @@ function stringValue(value: unknown) {
 function safeMessageSendErrorCode(error: unknown) {
   if (!(error instanceof HttpException)) return 'message_rejected';
   const response = error.getResponse();
-  const message = typeof response === 'string'
-    ? response
-    : response && typeof response === 'object' && 'message' in response
-      ? (response as { message?: unknown }).message
-      : undefined;
+  const message =
+    typeof response === 'string'
+      ? response
+      : response && typeof response === 'object' && 'message' in response
+        ? (response as { message?: unknown }).message
+        : undefined;
   const code = Array.isArray(message) ? message[0] : message;
-  return typeof code === 'string' && /^CHAT_[A-Z0-9_]+$/.test(code) ? code : 'message_rejected';
+  return typeof code === 'string' && /^CHAT_[A-Z0-9_]+$/.test(code)
+    ? code
+    : 'message_rejected';
 }
 
 function cookieValue(header: string | undefined, name: string) {
   if (!header) return undefined;
   const prefix = `${name}=`;
-  const cookie = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  const cookie = header
+    .split(';')
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(prefix));
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : undefined;
 }
