@@ -9,6 +9,7 @@ import {
   UPDATER_PROTOCOL_VERSION,
   canCancel,
   compareVersions,
+  isValidationFixtureVersion,
   parseVersion,
   sanitizeLog,
   transitionRun,
@@ -25,7 +26,7 @@ import {
   type ProvenanceVerifier,
 } from './provenance.js';
 import { verifyManifestImage } from './release-verifier.js';
-import type { ReleaseProvider } from './release.js';
+import type { AgentRelease, ReleaseProvider } from './release.js';
 import { AgentStore } from './store.js';
 
 const REQUIRED_ENV_KEYS = ['PE_COMMUNITY_VERSION', 'POSTGRES_PASSWORD', 'JWT_SECRET', 'PASSWORD_PEPPER', 'EMAIL_ENCRYPTION_KEY', 'WEB_ORIGIN'];
@@ -113,10 +114,12 @@ export class UpdaterAgent {
     let run = initial;
     let originalEnv = '';
     let manifest: ReleaseManifest | null = null;
+    let imageBundles: AgentRelease['imageBundles'] | null = null;
     try {
       run = await this.phase(run, 'PREFLIGHT', 'PREFLIGHT_STARTED', 'Preflight checks started.');
       const release = await this.releases.target(run.targetVersion);
       manifest = release.manifest;
+      imageBundles = release.imageBundles;
       run = {
         ...run,
         releaseMetadataSnapshot: manifest,
@@ -140,7 +143,7 @@ export class UpdaterAgent {
       run = await this.cancelIfRequested(run, async () => writeFile(this.config.envFile, originalEnv, { mode: 0o600 }));
 
       run = await this.phase(run, 'VERIFYING', 'IMAGE_VERIFY_STARTED', 'Verifying image repositories and digests.');
-      await this.verifyImages(manifest, run.targetVersion, run);
+      await this.verifyImages(manifest, imageBundles, run.targetVersion, run);
       await this.log(run, 'SUCCESS', 'IMAGES_VERIFIED', 'All release images and provenance attestations match the approved release.');
 
       run = await this.phase(run, 'MIGRATING', 'MIGRATION_STARTED', 'Applying production database migrations with the target API image.');
@@ -325,7 +328,7 @@ export class UpdaterAgent {
     await this.executor.run('docker', [...composePrefix, 'exec', '-T', 'postgres', 'pg_restore', '--list'], { stdinPath: dumpPath, timeoutMs: 5 * 60_000 });
   }
 
-  private async verifyImages(manifest: ReleaseManifest, version: string, run: UpdateRun) {
+  private async verifyImages(manifest: ReleaseManifest, imageBundles: AgentRelease['imageBundles'], version: string, run: UpdateRun) {
     for (const service of ['api', 'web', 'worker'] as const) {
       const repository = this.imageRepositories[service];
       if (manifest.images[service].repository !== repository)
@@ -335,7 +338,7 @@ export class UpdaterAgent {
       const digests = JSON.parse(inspected.stdout) as string[];
       if (!digests.includes(`${repository}@${manifest.images[service].digest}`)) throw new AgentError(`DIGEST_MISMATCH_${service.toUpperCase()}`);
       try {
-        const result = await verifyManifestImage(manifest, service, this.provenance, this.imageRepositories);
+        const result = await verifyManifestImage(manifest, service, this.provenance, imageBundles[service], this.imageRepositories);
         run.provenanceResults = [...run.provenanceResults, result];
         await this.store.saveRun(run);
         await this.log(run, 'SUCCESS', 'SYSTEM_UPDATE_PROVENANCE_VERIFIED', `${service.toUpperCase()} release provenance verified.`);
@@ -472,11 +475,14 @@ function validIdempotencyKey(value: unknown) {
 }
 
 function validInstallVersion(value: unknown) {
+  let version: string;
   try {
-    return parseVersion(value).normalized;
+    version = parseVersion(value).normalized;
   } catch {
     throw new AgentError('INVALID_VERSION', 400);
   }
+  if (isValidationFixtureVersion(version)) throw new AgentError('VALIDATION_FIXTURE_NOT_INSTALLABLE', 400);
+  return version;
 }
 
 async function writeVersion(path: string, source: string, version: string) {

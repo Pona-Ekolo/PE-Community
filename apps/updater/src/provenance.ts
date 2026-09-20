@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, realpathSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { bundledVerifierPath } from './config.js';
@@ -19,14 +19,6 @@ export const PROVENANCE_POLICY = Object.freeze({
   maximumOutputBytes: 1024 * 1024,
 } as const);
 
-const VERIFIER_ENV: NodeJS.ProcessEnv = Object.freeze({
-  HOME: process.env.PE_UPDATER_STATE_DIR ?? tmpdir(),
-  LANG: 'C.UTF-8',
-  LC_ALL: 'C.UTF-8',
-  NO_COLOR: '1',
-  PATH: '/usr/bin:/bin',
-});
-
 export type ProvenanceService = 'manifest' | 'api' | 'web' | 'worker';
 
 export type ProvenanceVerificationResult = {
@@ -43,9 +35,10 @@ export type ProvenanceVerificationResult = {
 export interface ProvenanceVerifier {
   preflight(): Promise<string>;
   verify(input: {
-    service: ProvenanceService;
+    service: Exclude<ProvenanceService, 'manifest'>;
     repository: string;
     digest: string;
+    bundle: Uint8Array;
     releaseTag: string;
     sourceCommit: string;
   }): Promise<ProvenanceVerificationResult>;
@@ -54,6 +47,7 @@ export interface ProvenanceVerifier {
 export interface ManifestAttestationVerifier {
   verify(input: {
     payload: Uint8Array;
+    bundle: Uint8Array;
     releaseTag: string;
     sourceCommit: string;
   }): Promise<ProvenanceVerificationResult>;
@@ -90,56 +84,54 @@ export class GitHubCliProvenanceVerifier implements ProvenanceVerifier {
   async preflight() {
     if (this.verifierVersion) return this.verifierVersion;
     this.inspectVerifier();
-    let output: string;
-    try {
-      const result = await this.executor.run(
-        this.verifierExecutable,
-        ['version'],
-        {
-          timeoutMs: 10_000,
-          maxOutputBytes: 64 * 1024,
-          env: VERIFIER_ENV,
-        },
-      );
-      output = result.stdout;
-    } catch (error) {
-      throw mapVerifierError(error);
-    }
-    const version = output.match(/^gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)/m);
-    if (!version) throw new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
-    const parsed = version.slice(1, 4).join('.');
-    if (parsed !== PROVENANCE_POLICY.verifierVersion) {
-      throw new ProvenanceError('PROVENANCE_VERIFIER_UNSUPPORTED');
-    }
-    this.verifierVersion = parsed;
+    this.verifierVersion = await preflightVerifier(
+      this.executor,
+      mapPreflightError,
+      this.verifierExecutable,
+    );
     return this.verifierVersion;
   }
 
   async verify(input: {
-    service: ProvenanceService;
+    service: Exclude<ProvenanceService, 'manifest'>;
     repository: string;
     digest: string;
+    bundle: Uint8Array;
     releaseTag: string;
     sourceCommit: string;
   }) {
     validateVerifierInput(input);
     const verifierVersion = await this.preflight();
     let output: string;
+    const directory = await createVerificationDirectory('image');
+    const bundlePath = join(directory, `${input.service}.attestation.jsonl`);
     try {
+      await writePrivateFile(
+        bundlePath,
+        input.bundle,
+        `IMAGE_PROVENANCE_INVALID_${input.service.toUpperCase()}`,
+      );
       const result = await this.executor.run(
         this.verifierExecutable,
-        provenanceVerifierArgs(input),
+        provenanceVerifierArgs(input, bundlePath),
         {
           timeoutMs: PROVENANCE_POLICY.timeoutMs,
           maxOutputBytes: PROVENANCE_POLICY.maximumOutputBytes,
-          env: VERIFIER_ENV,
+          env: verifierEnvironment(directory),
         },
       );
       output = result.stdout;
     } catch (error) {
-      throw mapVerifierError(error);
+      throw mapVerifierError(error, input.service);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
     }
-    validateVerifierOutput(output, input.repository, input.digest);
+    validateVerifierOutput(
+      output,
+      input.repository,
+      input.digest,
+      input.service,
+    );
     return {
       service: input.service,
       digest: input.digest,
@@ -153,18 +145,23 @@ export class GitHubCliProvenanceVerifier implements ProvenanceVerifier {
   }
 }
 
-export function provenanceVerifierArgs(input: {
-  service: ProvenanceService;
-  repository: string;
-  digest: string;
-  releaseTag: string;
-  sourceCommit: string;
-}) {
+export function provenanceVerifierArgs(
+  input: {
+    service: Exclude<ProvenanceService, 'manifest'>;
+    repository: string;
+    digest: string;
+    releaseTag: string;
+    sourceCommit: string;
+  },
+  bundlePath: string,
+) {
   validateVerifierInput(input);
   return [
     'attestation',
     'verify',
     `oci://${input.repository}@${input.digest}`,
+    '--bundle',
+    bundlePath,
     '--repo',
     PROVENANCE_POLICY.repository,
     '--hostname',
@@ -198,6 +195,7 @@ export class GitHubCliManifestAttestationVerifier implements ManifestAttestation
 
   async verify(input: {
     payload: Uint8Array;
+    bundle: Uint8Array;
     releaseTag: string;
     sourceCommit: string;
   }) {
@@ -206,9 +204,9 @@ export class GitHubCliManifestAttestationVerifier implements ManifestAttestation
         input.releaseTag,
       )
     )
-      throw new ProvenanceError('MANIFEST_ATTESTATION_SOURCE_MISMATCH');
+      throw new ProvenanceError('MANIFEST_SOURCE_MISMATCH');
     if (!/^[a-f0-9]{40}$/.test(input.sourceCommit))
-      throw new ProvenanceError('MANIFEST_ATTESTATION_SOURCE_MISMATCH');
+      throw new ProvenanceError('MANIFEST_SOURCE_MISMATCH');
 
     this.inspectVerifier();
     this.verifierVersion ??= await preflightVerifier(
@@ -216,17 +214,32 @@ export class GitHubCliManifestAttestationVerifier implements ManifestAttestation
       mapManifestVerifierError,
       this.verifierExecutable,
     );
-    const directory = await mkdtemp(join(tmpdir(), 'pe-community-manifest-'));
+    const directory = await createVerificationDirectory('manifest');
     const manifestPath = join(directory, 'pe-community-update-manifest.json');
+    const bundlePath = join(
+      directory,
+      'pe-community-update-manifest.attestation.jsonl',
+    );
     const digest = createHash('sha256').update(input.payload).digest('hex');
     try {
-      await writeFile(manifestPath, input.payload, { flag: 'wx', mode: 0o600 });
+      await writePrivateFile(
+        manifestPath,
+        input.payload,
+        'MANIFEST_SUBJECT_MISMATCH',
+      );
+      await writePrivateFile(
+        bundlePath,
+        input.bundle,
+        'MANIFEST_BUNDLE_INVALID',
+      );
       const result = await this.executor.run(
         this.verifierExecutable,
         [
           'attestation',
           'verify',
           manifestPath,
+          '--bundle',
+          bundlePath,
           '--repo',
           PROVENANCE_POLICY.repository,
           '--hostname',
@@ -250,7 +263,7 @@ export class GitHubCliManifestAttestationVerifier implements ManifestAttestation
         {
           timeoutMs: PROVENANCE_POLICY.timeoutMs,
           maxOutputBytes: PROVENANCE_POLICY.maximumOutputBytes,
-          env: VERIFIER_ENV,
+          env: verifierEnvironment(directory),
         },
       );
       validateManifestVerifierOutput(result.stdout, digest);
@@ -277,24 +290,26 @@ async function preflightVerifier(
   mapError: (error: unknown) => ProvenanceError,
   verifierExecutable: string,
 ) {
-  let output: string;
+  const directory = await createVerificationDirectory('image');
   try {
-    output = (
+    const output = (
       await executor.run(verifierExecutable, ['version'], {
         timeoutMs: 10_000,
         maxOutputBytes: 64 * 1024,
-        env: VERIFIER_ENV,
+        env: verifierEnvironment(directory),
       })
     ).stdout;
+    const version = output.match(/^gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)/m);
+    if (!version) throw new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+    const parsed = version.slice(1, 4).join('.');
+    if (parsed !== PROVENANCE_POLICY.verifierVersion)
+      throw new ProvenanceError('PROVENANCE_VERIFIER_UNSUPPORTED');
+    return parsed;
   } catch (error) {
     throw mapError(error);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
-  const version = output.match(/^gh version (\d+)\.(\d+)\.(\d+)(?:\s|$)/m);
-  if (!version) throw new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
-  const parsed = version.slice(1, 4).join('.');
-  if (parsed !== PROVENANCE_POLICY.verifierVersion)
-    throw new ProvenanceError('PROVENANCE_VERIFIER_UNSUPPORTED');
-  return parsed;
 }
 
 export function assertBundledVerifier(
@@ -324,64 +339,84 @@ export function assertBundledVerifier(
 }
 
 function validateVerifierInput(input: {
-  service: ProvenanceService;
+  service: Exclude<ProvenanceService, 'manifest'>;
   repository: string;
   digest: string;
   releaseTag: string;
   sourceCommit: string;
 }) {
-  if (
-    !/^ghcr\.io\/pona-ekolo\/pe-community-(?:api|web|worker)$/.test(
-      input.repository,
-    )
-  )
-    throw new ProvenanceError('PROVENANCE_IDENTITY_MISMATCH');
+  if (input.repository !== `ghcr.io/pona-ekolo/pe-community-${input.service}`)
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${input.service.toUpperCase()}`,
+    );
   if (!/^sha256:[a-f0-9]{64}$/.test(input.digest))
-    throw new ProvenanceError('PROVENANCE_DIGEST_MISMATCH');
+    throw new ProvenanceError(
+      `IMAGE_DIGEST_MISMATCH_${input.service.toUpperCase()}`,
+    );
   if (
     !/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/.test(input.releaseTag)
   )
-    throw new ProvenanceError('PROVENANCE_RELEASE_TAG_MISMATCH');
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${input.service.toUpperCase()}`,
+    );
   if (!/^[a-f0-9]{40}$/.test(input.sourceCommit))
-    throw new ProvenanceError('PROVENANCE_SOURCE_COMMIT_MISMATCH');
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${input.service.toUpperCase()}`,
+    );
 }
 
 function validateVerifierOutput(
   output: string,
   repository: string,
   digest: string,
+  service: Exclude<ProvenanceService, 'manifest'>,
 ) {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
   } catch {
-    throw new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   }
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 10)
-    throw new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   const digestHex = digest.slice('sha256:'.length);
-  const valid = parsed.some((entry) => {
+  const eligible = parsed.filter((entry) => {
     const result = record(record(entry)?.verificationResult);
     const statement = record(result?.statement);
     const signature = record(result?.signature);
     const timestamps = result?.verifiedTimestamps;
-    const subjects = statement?.subject;
     return (
       statement?.predicateType === PROVENANCE_POLICY.predicateType &&
-      Array.isArray(subjects) &&
-      subjects.some((subject) => {
-        const value = record(subject);
-        const subjectDigest = record(value?.digest);
-        return (
-          value?.name === repository && subjectDigest?.sha256 === digestHex
-        );
-      }) &&
       Boolean(signature && Object.keys(signature).length) &&
       Array.isArray(timestamps) &&
       timestamps.length > 0
     );
   });
-  if (!valid) throw new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+  if (eligible.length === 0)
+    throw new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
+  const subjectMatches = eligible.some((entry) => {
+    const statement = record(
+      record(record(entry)?.verificationResult)?.statement,
+    );
+    return (
+      Array.isArray(statement?.subject) &&
+      statement.subject.some((subject) => {
+        const value = record(subject);
+        const subjectDigest = record(value?.digest);
+        return (
+          value?.name === repository && subjectDigest?.sha256 === digestHex
+        );
+      })
+    );
+  });
+  if (!subjectMatches)
+    throw new ProvenanceError(`IMAGE_DIGEST_MISMATCH_${service.toUpperCase()}`);
 }
 
 function validateManifestVerifierOutput(output: string, digest: string) {
@@ -389,34 +424,62 @@ function validateManifestVerifierOutput(output: string, digest: string) {
   try {
     parsed = JSON.parse(output);
   } catch {
-    throw new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
+    throw new ProvenanceError('MANIFEST_BUNDLE_INVALID');
   }
   if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 10)
-    throw new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
-  const valid = parsed.some((entry) => {
+    throw new ProvenanceError('MANIFEST_BUNDLE_INVALID');
+  const eligible = parsed.filter((entry) => {
     const result = record(record(entry)?.verificationResult);
     const statement = record(result?.statement);
     const signature = record(result?.signature);
-    const subjects = statement?.subject;
     return (
       statement?.predicateType === PROVENANCE_POLICY.predicateType &&
-      Array.isArray(subjects) &&
-      subjects.some((subject) => {
-        const value = record(subject);
-        return (
-          value?.name === 'pe-community-update-manifest.json' &&
-          record(value?.digest)?.sha256 === digest
-        );
-      }) &&
       Boolean(signature && Object.keys(signature).length) &&
       Array.isArray(result?.verifiedTimestamps) &&
       result.verifiedTimestamps.length > 0
     );
   });
-  if (!valid) throw new ProvenanceError('MANIFEST_DIGEST_MISMATCH');
+  if (eligible.length === 0)
+    throw new ProvenanceError('MANIFEST_BUNDLE_INVALID');
+  const subjectMatches = eligible.some((entry) => {
+    const statement = record(
+      record(record(entry)?.verificationResult)?.statement,
+    );
+    return (
+      Array.isArray(statement?.subject) &&
+      statement.subject.some((subject) => {
+        const value = record(subject);
+        return (
+          value?.name === 'pe-community-update-manifest.json' &&
+          record(value?.digest)?.sha256 === digest
+        );
+      })
+    );
+  });
+  if (!subjectMatches) throw new ProvenanceError('MANIFEST_SUBJECT_MISMATCH');
 }
 
-function mapVerifierError(error: unknown) {
+function mapPreflightError(error: unknown) {
+  if (error instanceof ProvenanceError) return error;
+  const system = error as NodeJS.ErrnoException & {
+    killed?: boolean;
+    signal?: string;
+  };
+  if (system.code === 'ENOENT')
+    return new ProvenanceError('PROVENANCE_VERIFIER_MISSING');
+  if (
+    system.killed ||
+    system.signal === 'SIGTERM' ||
+    system.code === 'ETIMEDOUT'
+  )
+    return new ProvenanceError('PROVENANCE_TIMEOUT');
+  return new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+}
+
+function mapVerifierError(
+  error: unknown,
+  service: Exclude<ProvenanceService, 'manifest'> = 'api',
+) {
   if (error instanceof ProvenanceError) return error;
   const system = error as NodeJS.ErrnoException & {
     killed?: boolean;
@@ -430,27 +493,41 @@ function mapVerifierError(error: unknown) {
     system.signal === 'SIGTERM' ||
     system.code === 'ETIMEDOUT'
   )
-    return new ProvenanceError('PROVENANCE_TIMEOUT');
+    return new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   if (system.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-    return new ProvenanceError('PROVENANCE_OUTPUT_INVALID');
+    return new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   const detail = sanitizeLog(system.stderr ?? system.message).toLowerCase();
   if (/no attestations? found|attestation not found/.test(detail))
-    return new ProvenanceError('PROVENANCE_NOT_FOUND');
+    return new ProvenanceError(`IMAGE_BUNDLE_MISSING_${service.toUpperCase()}`);
   if (
     /rate limit|network|connection|resolve|timed out|http status|fetch/.test(
       detail,
     )
   )
-    return new ProvenanceError('PROVENANCE_FETCH_FAILED');
+    return new ProvenanceError('TRUST_ROOT_UNAVAILABLE');
   if (/signer workflow|workflow identity/.test(detail))
-    return new ProvenanceError('PROVENANCE_WORKFLOW_MISMATCH');
+    return new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   if (/repository identity|owner identity/.test(detail))
-    return new ProvenanceError('PROVENANCE_IDENTITY_MISMATCH');
+    return new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
   if (/subject digest|digest mismatch/.test(detail))
-    return new ProvenanceError('PROVENANCE_DIGEST_MISMATCH');
+    return new ProvenanceError(
+      `IMAGE_DIGEST_MISMATCH_${service.toUpperCase()}`,
+    );
   if (/signature|certificate|verification failed/.test(detail))
-    return new ProvenanceError('PROVENANCE_SIGNATURE_INVALID');
-  return new ProvenanceError('PROVENANCE_VERIFICATION_FAILED');
+    return new ProvenanceError(
+      `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+    );
+  return new ProvenanceError(
+    `IMAGE_PROVENANCE_INVALID_${service.toUpperCase()}`,
+  );
 }
 
 function mapManifestVerifierError(error: unknown) {
@@ -467,29 +544,59 @@ function mapManifestVerifierError(error: unknown) {
     system.signal === 'SIGTERM' ||
     system.code === 'ETIMEDOUT'
   )
-    return new ProvenanceError('MANIFEST_ATTESTATION_TIMEOUT');
+    return new ProvenanceError('MANIFEST_BUNDLE_INVALID');
   if (system.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
-    return new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
+    return new ProvenanceError('MANIFEST_BUNDLE_INVALID');
   const detail = sanitizeLog(system.stderr ?? system.message).toLowerCase();
   if (/no attestations? found|attestation not found/.test(detail))
-    return new ProvenanceError('MANIFEST_ATTESTATION_MISSING');
+    return new ProvenanceError('MANIFEST_BUNDLE_MISSING');
   if (
     /rate limit|network|connection|resolve|timed out|http status|fetch/.test(
       detail,
     )
   )
-    return new ProvenanceError('MANIFEST_ATTESTATION_FETCH_FAILED');
+    return new ProvenanceError('TRUST_ROOT_UNAVAILABLE');
   if (/signer workflow|workflow identity/.test(detail))
-    return new ProvenanceError('MANIFEST_ATTESTATION_WORKFLOW_MISMATCH');
+    return new ProvenanceError('MANIFEST_WORKFLOW_MISMATCH');
   if (/repository identity|owner identity/.test(detail))
-    return new ProvenanceError('MANIFEST_ATTESTATION_IDENTITY_MISMATCH');
+    return new ProvenanceError('MANIFEST_SIGNER_MISMATCH');
   if (/source digest|source ref|source commit/.test(detail))
-    return new ProvenanceError('MANIFEST_ATTESTATION_SOURCE_MISMATCH');
+    return new ProvenanceError('MANIFEST_SOURCE_MISMATCH');
   if (/subject digest|digest mismatch/.test(detail))
-    return new ProvenanceError('MANIFEST_DIGEST_MISMATCH');
+    return new ProvenanceError('MANIFEST_SUBJECT_MISMATCH');
   if (/signature|certificate|verification failed/.test(detail))
-    return new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
-  return new ProvenanceError('MANIFEST_ATTESTATION_INVALID');
+    return new ProvenanceError('MANIFEST_BUNDLE_INVALID');
+  return new ProvenanceError('MANIFEST_BUNDLE_INVALID');
+}
+
+async function createVerificationDirectory(kind: 'manifest' | 'image') {
+  const directory = await mkdtemp(join(tmpdir(), `pe-community-${kind}-`));
+  await Promise.all([
+    mkdir(join(directory, 'gh-config'), { mode: 0o700 }),
+    mkdir(join(directory, 'docker-config'), { mode: 0o700 }),
+  ]);
+  return directory;
+}
+
+function verifierEnvironment(directory: string): NodeJS.ProcessEnv {
+  return {
+    HOME: directory,
+    GH_CONFIG_DIR: join(directory, 'gh-config'),
+    DOCKER_CONFIG: join(directory, 'docker-config'),
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    NO_COLOR: '1',
+    PATH: '/usr/bin:/bin',
+  };
+}
+
+async function writePrivateFile(
+  path: string,
+  bytes: Uint8Array,
+  emptyCode: string,
+) {
+  if (bytes.byteLength === 0) throw new ProvenanceError(emptyCode);
+  await writeFile(path, bytes, { flag: 'wx', mode: 0o600 });
 }
 
 function record(value: unknown): Record<string, unknown> | null {

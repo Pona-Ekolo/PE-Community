@@ -2,8 +2,9 @@ import { createHash } from 'node:crypto';
 import type { ProvenanceVerificationResult } from './provenance.js';
 
 export const UPDATER_VERSION = '1.4.0';
-export const SUPPORTED_RELEASE_CONTRACT_VERSION = 1;
+export const SUPPORTED_RELEASE_CONTRACT_VERSION = 2;
 export const UPDATER_PROTOCOL_VERSION = 2;
+export const VALIDATION_FIXTURE_VERSION = 'v0.0.0';
 export const UPDATE_PHASES = [
   'PENDING',
   'PREFLIGHT',
@@ -58,7 +59,7 @@ export type UpdateRun = {
 
 export type ReleaseManifest = {
   schemaVersion: 2;
-  releaseContractVersion: 1;
+  releaseContractVersion: 2;
   version: string;
   channel: 'stable';
   minimumVersion: string;
@@ -169,6 +170,10 @@ export function compareVersions(left: string, right: string) {
     if (a[index] !== b[index]) return a[index] < b[index] ? -1 : 1;
   }
   return 0;
+}
+
+export function isValidationFixtureVersion(value: string) {
+  return value === VALIDATION_FIXTURE_VERSION;
 }
 
 export function validateManifest(value: unknown): ReleaseManifest {

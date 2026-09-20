@@ -111,7 +111,7 @@ test(
       );
       const manifest: ReleaseManifest = {
         schemaVersion: 2,
-        releaseContractVersion: 1,
+        releaseContractVersion: 2,
         version: 'v1.1.0',
         releaseTag: 'v1.1.0',
         sourceCommit: 'd'.repeat(40),
@@ -142,6 +142,11 @@ test(
         publishedAt: new Date().toISOString(),
         notes: 'Disposable integration fixture',
         manifest,
+        imageBundles: {
+          api: new Uint8Array([1]),
+          web: new Uint8Array([2]),
+          worker: new Uint8Array([3]),
+        },
         manifestProvenance: {
           service: 'manifest',
           digest: `sha256:${'f'.repeat(64)}`,

@@ -38,6 +38,10 @@ test('release workflow is SHA-pinned, least-privilege, draft-first, and inventor
   );
   assert.match(workflow, /mode=release/);
   assert.match(workflow, /mode=validation/);
+  assert.match(workflow, /if \[\[ "\$RELEASE_TAG" == "v0\.0\.0" \]\]/);
+  assert.match(workflow, /image_tag=validation-fixture-\$source_commit/);
+  assert.match(workflow, /else\s+echo "image_tag=\$RELEASE_TAG"/);
+  assert.doesNotMatch(workflow, /image_tag=(?:latest|stable)/);
   assert.match(workflow, /Manual validation must run from main/);
   assert.match(workflow, /build_version=v0\.0\.0-validation\.\$RUN_ID/);
   assert.match(workflow, /image_tag=validation-\$RUN_ID/);
@@ -94,9 +98,17 @@ test('release workflow is SHA-pinned, least-privilege, draft-first, and inventor
     workflow,
     /attestationPolicy:\\?"GITHUB_PROVENANCE_REQUIRED\\?"/,
   );
-  assert.match(workflow, /releaseContractVersion:1/);
+  assert.match(workflow, /releaseContractVersion:2/);
   assert.match(workflow, /releaseTag:\$version/);
   assert.match(workflow, /subject-path: pe-community-update-manifest\.json/);
+  for (const asset of [
+    'pe-community-update-manifest.attestation.jsonl',
+    'pe-community-api.attestation.jsonl',
+    'pe-community-web.attestation.jsonl',
+    'pe-community-worker.attestation.jsonl',
+  ]) {
+    assert.match(workflow, new RegExp(asset.replaceAll('.', '\\.')));
+  }
   assert.match(workflow, /needs: \[validate, image\]/);
   assert.match(workflow, /verifyPinnedArchive/);
   assert.match(workflow, /verifyUpstreamArchiveEntries/);
@@ -116,6 +128,10 @@ test('release workflow is SHA-pinned, least-privilege, draft-first, and inventor
   assert.match(workflow, /HISTORICAL_RELEASE_WEB_DIGEST_MISSING/);
   assert.match(workflow, /HISTORICAL_RELEASE_WORKER_DIGEST_MISSING/);
   assert.match(workflow, /refs\/tags\/\$PROVENANCE_TEST_RELEASE_TAG/);
+  assert.match(
+    workflow,
+    /source_commit="\$\(git rev-parse "refs\/tags\/\$RELEASE_TAG\^\{commit\}"\)"/,
+  );
   assert.match(workflow, /PROVENANCE_POLICY_REPOSITORY_MISMATCH_NOT_REJECTED/);
   const historicalProof = workflow.slice(
     workflow.indexOf('          release='),
@@ -129,8 +145,9 @@ test('release workflow is SHA-pinned, least-privilege, draft-first, and inventor
   );
   assert.match(
     historicalProof,
-    /attestation verify "\$historical_manifest"[\s\S]*> "\$stage\/historical-manifest-verification\.txt"/,
+    /attestation verify "\$historical_manifest" --bundle "\$historical_manifest_bundle"[\s\S]*> "\$stage\/historical-manifest-verification\.txt"/,
   );
+  assert.match(historicalProof, /raw\.releaseContractVersion !== 2/);
   assert.match(
     historicalProof,
     /Historical \$\{PROVENANCE_TEST_RELEASE_TAG\} manifest provenance: verified/,
@@ -282,11 +299,11 @@ test('release workflow is SHA-pinned, least-privilege, draft-first, and inventor
   }
 });
 
-test('workflow-shaped manifest fixture satisfies release contract version one', () => {
+test('workflow-shaped manifest fixture satisfies release contract version two', () => {
   const version = 'v1.2.3';
   const manifest = validateManifest({
     schemaVersion: 2,
-    releaseContractVersion: 1,
+    releaseContractVersion: 2,
     version,
     releaseTag: version,
     channel: 'stable',
@@ -312,7 +329,7 @@ test('workflow-shaped manifest fixture satisfies release contract version one', 
     supplyChain: { attestationPolicy: 'GITHUB_PROVENANCE_REQUIRED' },
     requiresManualAction: false,
   });
-  assert.equal(manifest.releaseContractVersion, 1);
+  assert.equal(manifest.releaseContractVersion, 2);
 });
 
 test('unsupported future release contracts fail closed', () => {
@@ -320,7 +337,7 @@ test('unsupported future release contracts fail closed', () => {
     () =>
       validateManifest({
         schemaVersion: 2,
-        releaseContractVersion: 2,
+        releaseContractVersion: 3,
         version: 'v1.2.3',
         releaseTag: 'v1.2.3',
         channel: 'stable',

@@ -27,6 +27,7 @@ export async function verifyRelease(input: {
     imageProvenance: await verifyManifestImages(
       release.manifest,
       input.provenance,
+      release.imageBundles,
     ),
   };
 }
@@ -44,6 +45,7 @@ export function assertReleaseVerificationPolicy(manifest: ReleaseManifest) {
 export async function verifyManifestImages(
   manifest: ReleaseManifest,
   provenance: ProvenanceVerifier,
+  bundles: AgentRelease['imageBundles'],
   imageRepositories: Record<
     'api' | 'web' | 'worker',
     string
@@ -57,6 +59,7 @@ export async function verifyManifestImages(
         manifest,
         service,
         provenance,
+        bundles[service],
         imageRepositories,
       ),
     );
@@ -68,6 +71,7 @@ export async function verifyManifestImage(
   manifest: ReleaseManifest,
   service: 'api' | 'web' | 'worker',
   provenance: ProvenanceVerifier,
+  bundle: Uint8Array,
   imageRepositories: Record<
     'api' | 'web' | 'worker',
     string
@@ -81,6 +85,7 @@ export async function verifyManifestImage(
     service,
     repository,
     digest: manifest.images[service].digest,
+    bundle,
     releaseTag: manifest.releaseTag,
     sourceCommit: manifest.sourceCommit,
   });

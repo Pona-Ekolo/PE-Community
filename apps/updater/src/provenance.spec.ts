@@ -25,6 +25,9 @@ const input = {
   service: 'api' as const,
   repository: 'ghcr.io/pona-ekolo/pe-community-api',
   digest,
+  bundle: new TextEncoder().encode(
+    '{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}',
+  ),
   releaseTag: 'v1.2.3',
   sourceCommit,
 };
@@ -34,23 +37,16 @@ test('official verifier uses the bundled executable, exact digest, and immutable
   const result = await provenanceVerifier(executor).verify(input);
   assert.equal(result.result, 'VERIFIED');
   assert.equal(result.digest, digest);
-  assert.deepEqual(executor.calls[0], {
-    executable: bundledVerifierPath(),
-    args: ['version'],
-    timeoutMs: 10_000,
-    maxOutputBytes: 64 * 1024,
-    env: {
-      HOME: tmpdir(),
-      LANG: 'C.UTF-8',
-      LC_ALL: 'C.UTF-8',
-      NO_COLOR: '1',
-      PATH: '/usr/bin:/bin',
-    },
-  });
+  assert.equal(executor.calls[0]?.executable, bundledVerifierPath());
+  assert.deepEqual(executor.calls[0]?.args, ['version']);
+  assert.equal(executor.calls[0]?.timeoutMs, 10_000);
+  assert.equal(executor.calls[0]?.maxOutputBytes, 64 * 1024);
   assert.deepEqual(executor.calls[1]?.args, [
     'attestation',
     'verify',
     `oci://${input.repository}@${digest}`,
+    '--bundle',
+    executor.calls[1]?.args[4],
     '--repo',
     'Pona-Ekolo/PE-Community',
     '--hostname',
@@ -77,6 +73,8 @@ test('official verifier uses the bundled executable, exact digest, and immutable
     PROVENANCE_POLICY.maximumOutputBytes,
   );
   assert.deepEqual(Object.keys(executor.calls[1]?.env ?? {}).sort(), [
+    'DOCKER_CONFIG',
+    'GH_CONFIG_DIR',
     'HOME',
     'LANG',
     'LC_ALL',
@@ -84,6 +82,14 @@ test('official verifier uses the bundled executable, exact digest, and immutable
     'PATH',
   ]);
   assert.equal(executor.calls[1]?.env?.GH_TOKEN, undefined);
+  assert.equal(executor.calls[1]?.env?.GITHUB_TOKEN, undefined);
+  assert.equal(executor.calls[1]?.env?.GH_HOST, undefined);
+  assert.equal(executor.calls[1]?.env?.GH_ENTERPRISE_TOKEN, undefined);
+  assert.notEqual(executor.calls[1]?.env?.HOME, process.env.HOME);
+  await assert.rejects(
+    () => stat(String(executor.calls[1]?.args[4])),
+    /ENOENT/,
+  );
 });
 
 test('bundled verifier resolution follows the installed package instead of a fixed host path', async (context) => {
@@ -130,10 +136,10 @@ test('verifier fails deterministically when missing, wrong-version, timed out, o
 
 test('verifier rejects missing attestations, network failures, invalid signatures, and non-zero failures', async () => {
   for (const [stderr, code] of [
-    ['no attestations found', 'PROVENANCE_NOT_FOUND'],
-    ['network connection failed', 'PROVENANCE_FETCH_FAILED'],
-    ['signature verification failed', 'PROVENANCE_SIGNATURE_INVALID'],
-    ['unexpected gh failure', 'PROVENANCE_VERIFICATION_FAILED'],
+    ['no attestations found', 'IMAGE_BUNDLE_MISSING_API'],
+    ['network connection failed', 'TRUST_ROOT_UNAVAILABLE'],
+    ['signature verification failed', 'IMAGE_PROVENANCE_INVALID_API'],
+    ['unexpected gh failure', 'IMAGE_PROVENANCE_INVALID_API'],
   ] as const) {
     const executor = new VerifierExecutor();
     executor.verifyError = { message: 'command failed', stderr };
@@ -142,26 +148,33 @@ test('verifier rejects missing attestations, network failures, invalid signature
 });
 
 test('verifier output must cryptographically report the exact subject digest and trusted predicate', async () => {
-  for (const output of [
-    '{invalid',
-    '[]',
-    JSON.stringify(verificationOutput(`sha256:${'b'.repeat(64)}`)),
-    JSON.stringify(
-      verificationOutput(digest, 'https://example.invalid/predicate'),
-    ),
-    JSON.stringify([
-      {
-        verificationResult: {
-          statement: verificationOutput(digest)[0].verificationResult.statement,
+  for (const [output, code] of [
+    ['{invalid', 'IMAGE_PROVENANCE_INVALID_API'],
+    ['[]', 'IMAGE_PROVENANCE_INVALID_API'],
+    [
+      JSON.stringify(verificationOutput(`sha256:${'b'.repeat(64)}`)),
+      'IMAGE_DIGEST_MISMATCH_API',
+    ],
+    [
+      JSON.stringify(
+        verificationOutput(digest, 'https://example.invalid/predicate'),
+      ),
+      'IMAGE_PROVENANCE_INVALID_API',
+    ],
+    [
+      JSON.stringify([
+        {
+          verificationResult: {
+            statement:
+              verificationOutput(digest)[0].verificationResult.statement,
+          },
         },
-      },
-    ]),
-  ]) {
+      ]),
+      'IMAGE_PROVENANCE_INVALID_API',
+    ],
+  ] as const) {
     const executor = new VerifierExecutor(undefined, undefined, output);
-    await expectCode(
-      provenanceVerifier(executor).verify(input),
-      'PROVENANCE_OUTPUT_INVALID',
-    );
+    await expectCode(provenanceVerifier(executor).verify(input), code);
   }
 });
 
@@ -169,24 +182,32 @@ test('manifest values cannot inject argv or redefine repository, workflow, or ex
   const verifier = provenanceVerifier(new VerifierExecutor());
   await expectCode(
     verifier.verify({ ...input, releaseTag: 'v1.2.3;id' }),
-    'PROVENANCE_RELEASE_TAG_MISMATCH',
+    'IMAGE_PROVENANCE_INVALID_API',
   );
   await expectCode(
     verifier.verify({ ...input, digest: `${digest};id` }),
-    'PROVENANCE_DIGEST_MISMATCH',
+    'IMAGE_DIGEST_MISMATCH_API',
   );
   await expectCode(
     verifier.verify({ ...input, repository: 'ghcr.io/attacker/image' }),
-    'PROVENANCE_IDENTITY_MISMATCH',
+    'IMAGE_PROVENANCE_INVALID_API',
+  );
+  await expectCode(
+    verifier.verify({
+      ...input,
+      service: 'web',
+      repository: 'ghcr.io/pona-ekolo/pe-community-api',
+    }),
+    'IMAGE_PROVENANCE_INVALID_WEB',
   );
   await expectCode(
     verifier.verify({ ...input, sourceCommit: `${sourceCommit};id` }),
-    'PROVENANCE_SOURCE_COMMIT_MISMATCH',
+    'IMAGE_PROVENANCE_INVALID_API',
   );
 });
 
 test('manifest verifier authenticates exact bytes before parsing with immutable policy argv', async () => {
-  const payload = new TextEncoder().encode('{"releaseContractVersion":1}');
+  const payload = new TextEncoder().encode('{"releaseContractVersion":2}');
   const executor = new VerifierExecutor(
     undefined,
     undefined,
@@ -194,6 +215,7 @@ test('manifest verifier authenticates exact bytes before parsing with immutable 
   );
   const result = await manifestVerifierWithInspector(executor).verify({
     payload,
+    bundle: input.bundle,
     releaseTag: 'v1.2.3',
     sourceCommit,
   });
@@ -208,7 +230,12 @@ test('manifest verifier authenticates exact bytes before parsing with immutable 
     String(args[2]),
     /\/pe-community-manifest-[^/]+\/pe-community-update-manifest\.json$/,
   );
-  assert.deepEqual(args.slice(3), [
+  assert.equal(args[3], '--bundle');
+  assert.match(
+    String(args[4]),
+    /pe-community-update-manifest\.attestation\.jsonl$/,
+  );
+  assert.deepEqual(args.slice(5), [
     '--repo',
     'Pona-Ekolo/PE-Community',
     '--hostname',
@@ -230,16 +257,17 @@ test('manifest verifier authenticates exact bytes before parsing with immutable 
     'json',
   ]);
   await assert.rejects(() => stat(String(args[2])), /ENOENT/);
+  await assert.rejects(() => stat(String(args[4])), /ENOENT/);
 });
 
 test('manifest verifier rejects missing, invalid, wrong-identity, wrong-workflow, source, timeout, and fetch failures', async () => {
   for (const [stderr, code] of [
-    ['no attestations found', 'MANIFEST_ATTESTATION_MISSING'],
-    ['signature verification failed', 'MANIFEST_ATTESTATION_INVALID'],
-    ['repository identity mismatch', 'MANIFEST_ATTESTATION_IDENTITY_MISMATCH'],
-    ['signer workflow mismatch', 'MANIFEST_ATTESTATION_WORKFLOW_MISMATCH'],
-    ['source digest mismatch', 'MANIFEST_ATTESTATION_SOURCE_MISMATCH'],
-    ['network connection failed', 'MANIFEST_ATTESTATION_FETCH_FAILED'],
+    ['no attestations found', 'MANIFEST_BUNDLE_MISSING'],
+    ['signature verification failed', 'MANIFEST_BUNDLE_INVALID'],
+    ['repository identity mismatch', 'MANIFEST_SIGNER_MISMATCH'],
+    ['signer workflow mismatch', 'MANIFEST_WORKFLOW_MISMATCH'],
+    ['source digest mismatch', 'MANIFEST_SOURCE_MISMATCH'],
+    ['network connection failed', 'TRUST_ROOT_UNAVAILABLE'],
   ] as const) {
     const executor = new VerifierExecutor();
     executor.verifyError = { message: 'command failed', stderr };
@@ -260,7 +288,7 @@ test('manifest verifier rejects missing, invalid, wrong-identity, wrong-workflow
       releaseTag: 'v1.2.3',
       sourceCommit,
     }),
-    'MANIFEST_ATTESTATION_TIMEOUT',
+    'MANIFEST_BUNDLE_INVALID',
   );
   await expectCode(
     manifestVerifierWithInspector(
@@ -288,7 +316,7 @@ test('manifest tampering and malformed verifier output fail with no digest trust
       releaseTag: 'v1.2.3',
       sourceCommit,
     }),
-    'MANIFEST_DIGEST_MISMATCH',
+    'MANIFEST_SUBJECT_MISMATCH',
   );
   await expectCode(
     manifestVerifierWithInspector(
@@ -298,7 +326,7 @@ test('manifest tampering and malformed verifier output fail with no digest trust
       releaseTag: 'v1.2.3',
       sourceCommit,
     }),
-    'MANIFEST_ATTESTATION_INVALID',
+    'MANIFEST_BUNDLE_INVALID',
   );
 });
 
@@ -348,7 +376,19 @@ function provenanceVerifier(executor: CommandExecutor) {
 }
 
 function manifestVerifierWithInspector(executor: CommandExecutor) {
-  return new GitHubCliManifestAttestationVerifier(executor, () => {});
+  const verifier = new GitHubCliManifestAttestationVerifier(executor, () => {});
+  return {
+    verify(
+      input: Omit<Parameters<typeof verifier.verify>[0], 'bundle'> & {
+        bundle?: Uint8Array;
+      },
+    ) {
+      return verifier.verify({
+        ...input,
+        bundle: input.bundle ?? new Uint8Array([1]),
+      });
+    },
+  };
 }
 
 test('bundled verifier inspection rejects a missing, symlinked, writable, or non-root verifier', () => {

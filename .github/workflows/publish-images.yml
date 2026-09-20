@@ -55,7 +55,11 @@ jobs:
             echo "source_commit=$source_commit" >> "$GITHUB_OUTPUT"
             echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
             echo "mode=release" >> "$GITHUB_OUTPUT"
-            echo "image_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            if [[ "$RELEASE_TAG" == "v0.0.0" ]]; then
+              echo "image_tag=validation-fixture-$source_commit" >> "$GITHUB_OUTPUT"
+            else
+              echo "image_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+            fi
           else
             [[ "$REF_TYPE" == "branch" && "$RELEASE_TAG" == "main" ]] || { echo "Manual validation must run from main." >&2; exit 1; }
             [[ "$DISPATCH_SHA" =~ ^[a-f0-9]{40}$ ]] || { echo "Validation dispatch SHA is invalid." >&2; exit 1; }
@@ -108,7 +112,8 @@ jobs:
             APP_VERSION=${{ needs.validate.outputs.version }}
             SOURCE_COMMIT=${{ needs.validate.outputs.source_commit }}
             BUILD_DATE=${{ needs.validate.outputs.build_date }}
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      - id: api-attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ghcr.io/pona-ekolo/pe-community-api
           subject-digest: ${{ steps.api.outputs.digest }}
@@ -124,7 +129,8 @@ jobs:
             APP_VERSION=${{ needs.validate.outputs.version }}
             SOURCE_COMMIT=${{ needs.validate.outputs.source_commit }}
             BUILD_DATE=${{ needs.validate.outputs.build_date }}
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      - id: web-attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ghcr.io/pona-ekolo/pe-community-web
           subject-digest: ${{ steps.web.outputs.digest }}
@@ -140,11 +146,30 @@ jobs:
             APP_VERSION=${{ needs.validate.outputs.version }}
             SOURCE_COMMIT=${{ needs.validate.outputs.source_commit }}
             BUILD_DATE=${{ needs.validate.outputs.build_date }}
-      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+      - id: worker-attestation
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-name: ghcr.io/pona-ekolo/pe-community-worker
           subject-digest: ${{ steps.worker.outputs.digest }}
           push-to-registry: true
+      - name: Prepare image attestation bundles
+        env:
+          API_BUNDLE: ${{ steps.api-attestation.outputs.bundle-path }}
+          WEB_BUNDLE: ${{ steps.web-attestation.outputs.bundle-path }}
+          WORKER_BUNDLE: ${{ steps.worker-attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          mkdir image-attestation-bundles
+          cp "$API_BUNDLE" image-attestation-bundles/pe-community-api.attestation.jsonl
+          cp "$WEB_BUNDLE" image-attestation-bundles/pe-community-web.attestation.jsonl
+          cp "$WORKER_BUNDLE" image-attestation-bundles/pe-community-worker.attestation.jsonl
+      - name: Transfer image attestation bundles
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: image-attestation-bundles-${{ github.run_id }}
+          path: image-attestation-bundles/*.jsonl
+          if-no-files-found: error
+          retention-days: 1
 
   artifacts:
     needs: [validate, image]
@@ -162,6 +187,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
+      - name: Download image attestation bundles
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: image-attestation-bundles-${{ github.run_id }}
+          path: .
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @pe/updater build
       - name: Build final release artifacts
@@ -186,7 +216,7 @@ jobs:
               --arg apiDigest "$API_DIGEST" \
               --arg webDigest "$WEB_DIGEST" \
               --arg workerDigest "$WORKER_DIGEST" \
-              '{schemaVersion:2,releaseContractVersion:1,version:$version,releaseTag:$version,channel:"stable",minimumVersion:"v0.1.0",minimumUpdaterVersion:"v1.4.0",sourceCommit:$sourceCommit,buildDate:$buildDate,images:{api:{repository:"ghcr.io/pona-ekolo/pe-community-api",digest:$apiDigest},web:{repository:"ghcr.io/pona-ekolo/pe-community-web",digest:$webDigest},worker:{repository:"ghcr.io/pona-ekolo/pe-community-worker",digest:$workerDigest}},database:{migrationCompatibility:"FORWARD_ONLY"},supplyChain:{attestationPolicy:"GITHUB_PROVENANCE_REQUIRED"},requiresManualAction:false}' \
+              '{schemaVersion:2,releaseContractVersion:2,version:$version,releaseTag:$version,channel:"stable",minimumVersion:"v0.1.0",minimumUpdaterVersion:"v1.4.0",sourceCommit:$sourceCommit,buildDate:$buildDate,images:{api:{repository:"ghcr.io/pona-ekolo/pe-community-api",digest:$apiDigest},web:{repository:"ghcr.io/pona-ekolo/pe-community-web",digest:$webDigest},worker:{repository:"ghcr.io/pona-ekolo/pe-community-worker",digest:$workerDigest}},database:{migrationCompatibility:"FORWARD_ONLY"},supplyChain:{attestationPolicy:"GITHUB_PROVENANCE_REQUIRED"},requiresManualAction:false}' \
               > pe-community-update-manifest.json
             node --input-type=module -e "import { readFileSync } from 'node:fs'; const { validateManifest } = await import('./apps/updater/dist/domain.js'); validateManifest(JSON.parse(readFileSync('pe-community-update-manifest.json', 'utf8')))"
           else
@@ -286,7 +316,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$BUNDLE_PATH"
-          cp "$BUNDLE_PATH" pe-community-update-manifest.attestation.json
+          cp "$BUNDLE_PATH" pe-community-update-manifest.attestation.jsonl
       - name: Verify current validation and historical release provenance with the bundled CLI
         if: needs.validate.outputs.mode == 'validation'
         env:
@@ -307,11 +337,11 @@ jobs:
           bundled_gh="$stage/pe-community-updater/bin/gh"
           test -f "$bundled_gh" && test ! -L "$bundled_gh" && test -x "$bundled_gh"
           [[ "$("$bundled_gh" version | head -n1)" == "gh version 2.93.0 "* ]] || { echo "BUNDLED_GH_VERSION_INVALID" >&2; exit 1; }
-          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --service api --digest "$API_DIGEST" --source-commit "$SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --bundle pe-community-api.attestation.jsonl --service api --digest "$API_DIGEST" --source-commit "$SOURCE_COMMIT"
           echo 'Current validation API provenance: verified'
-          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --service web --digest "$WEB_DIGEST" --source-commit "$SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --bundle pe-community-web.attestation.jsonl --service web --digest "$WEB_DIGEST" --source-commit "$SOURCE_COMMIT"
           echo 'Current validation Web provenance: verified'
-          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --service worker --digest "$WORKER_DIGEST" --source-commit "$SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-validation-provenance.mjs --gh "$bundled_gh" --bundle pe-community-worker.attestation.jsonl --service worker --digest "$WORKER_DIGEST" --source-commit "$SOURCE_COMMIT"
           echo 'Current validation Worker provenance: verified'
 
           release="$($bundled_gh api "repos/$GITHUB_REPOSITORY/releases/tags/$PROVENANCE_TEST_RELEASE_TAG")"
@@ -322,20 +352,29 @@ jobs:
             jq --arg name "$1" '[.assets[]? | select(.name == $name)] | length' <<<"$release"
           }
           [[ "$(historical_asset_count pe-community-update-manifest.json)" == "1" ]] || { echo "HISTORICAL_RELEASE_MANIFEST_MISSING" >&2; exit 1; }
-          [[ "$(historical_asset_count pe-community-update-manifest.attestation.json)" == "1" ]] || { echo "HISTORICAL_RELEASE_MANIFEST_ATTESTATION_MISSING" >&2; exit 1; }
+          [[ "$(historical_asset_count pe-community-update-manifest.attestation.jsonl)" == "1" ]] || { echo "HISTORICAL_RELEASE_MANIFEST_ATTESTATION_MISSING" >&2; exit 1; }
+          for service in api web worker; do
+            [[ "$(historical_asset_count "pe-community-${service}.attestation.jsonl")" == "1" ]] || { echo "HISTORICAL_RELEASE_IMAGE_ATTESTATION_MISSING" >&2; exit 1; }
+          done
           historical_manifest="$stage/pe-community-update-manifest.json"
           "$bundled_gh" release download "$PROVENANCE_TEST_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern pe-community-update-manifest.json --output "$historical_manifest"
-          "$bundled_gh" attestation verify "$historical_manifest" --repo Pona-Ekolo/PE-Community --hostname github.com --signer-workflow Pona-Ekolo/PE-Community/.github/workflows/publish-images.yml --predicate-type https://slsa.dev/provenance/v1 --cert-oidc-issuer https://token.actions.githubusercontent.com --source-ref "refs/tags/$PROVENANCE_TEST_RELEASE_TAG" --source-digest "$PROVENANCE_TEST_SOURCE_COMMIT" --deny-self-hosted-runners --limit 10 > "$stage/historical-manifest-verification.txt"
+          historical_manifest_bundle="$stage/pe-community-update-manifest.attestation.jsonl"
+          "$bundled_gh" release download "$PROVENANCE_TEST_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern pe-community-update-manifest.attestation.jsonl --output "$historical_manifest_bundle"
+          for service in api web worker; do
+            "$bundled_gh" release download "$PROVENANCE_TEST_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "pe-community-${service}.attestation.jsonl" --output "$stage/pe-community-${service}.attestation.jsonl"
+          done
+          mkdir "$stage/verify-home" "$stage/verify-gh-config" "$stage/verify-docker-config"
+          env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_ENTERPRISE_TOKEN HOME="$stage/verify-home" GH_CONFIG_DIR="$stage/verify-gh-config" DOCKER_CONFIG="$stage/verify-docker-config" "$bundled_gh" attestation verify "$historical_manifest" --bundle "$historical_manifest_bundle" --repo Pona-Ekolo/PE-Community --hostname github.com --signer-workflow Pona-Ekolo/PE-Community/.github/workflows/publish-images.yml --predicate-type https://slsa.dev/provenance/v1 --cert-oidc-issuer https://token.actions.githubusercontent.com --source-ref "refs/tags/$PROVENANCE_TEST_RELEASE_TAG" --source-digest "$PROVENANCE_TEST_SOURCE_COMMIT" --deny-self-hosted-runners --limit 10 > "$stage/historical-manifest-verification.txt"
           echo "Historical ${PROVENANCE_TEST_RELEASE_TAG} manifest provenance: verified"
-          node --input-type=module -e "import { readFileSync } from 'node:fs'; const { validateManifest } = await import('./apps/updater/dist/domain.js'); const [file, tag, commit] = process.argv.slice(1); const raw = JSON.parse(readFileSync(file, 'utf8')); const digestErrors = Object.freeze({ api: 'HISTORICAL_RELEASE_API_DIGEST_MISSING', web: 'HISTORICAL_RELEASE_WEB_DIGEST_MISSING', worker: 'HISTORICAL_RELEASE_WORKER_DIGEST_MISSING' }); if (!raw || typeof raw !== 'object' || raw.releaseContractVersion !== 1) throw new Error('HISTORICAL_RELEASE_CONTRACT_UNSUPPORTED'); for (const [service, errorCode] of Object.entries(digestErrors)) { const image = raw.images?.[service]; if (!image || typeof image.digest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(image.digest)) throw new Error(errorCode); } const manifest = validateManifest(raw); if (manifest.releaseTag !== tag || manifest.sourceCommit !== commit || manifest.supplyChain.attestationPolicy !== 'GITHUB_PROVENANCE_REQUIRED') throw new Error('HISTORICAL_RELEASE_MANIFEST_INVALID'); for (const service of Object.keys(digestErrors)) console.log('HISTORICAL_' + service.toUpperCase() + '_DIGEST=' + manifest.images[service].digest);" "$historical_manifest" "$PROVENANCE_TEST_RELEASE_TAG" "$PROVENANCE_TEST_SOURCE_COMMIT" > "$stage/historical-images.env"
+          node --input-type=module -e "import { readFileSync } from 'node:fs'; const { validateManifest } = await import('./apps/updater/dist/domain.js'); const [file, tag, commit] = process.argv.slice(1); const raw = JSON.parse(readFileSync(file, 'utf8')); const digestErrors = Object.freeze({ api: 'HISTORICAL_RELEASE_API_DIGEST_MISSING', web: 'HISTORICAL_RELEASE_WEB_DIGEST_MISSING', worker: 'HISTORICAL_RELEASE_WORKER_DIGEST_MISSING' }); if (!raw || typeof raw !== 'object' || raw.releaseContractVersion !== 2) throw new Error('HISTORICAL_RELEASE_CONTRACT_UNSUPPORTED'); for (const [service, errorCode] of Object.entries(digestErrors)) { const image = raw.images?.[service]; if (!image || typeof image.digest !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(image.digest)) throw new Error(errorCode); } const manifest = validateManifest(raw); if (manifest.releaseTag !== tag || manifest.sourceCommit !== commit || manifest.supplyChain.attestationPolicy !== 'GITHUB_PROVENANCE_REQUIRED') throw new Error('HISTORICAL_RELEASE_MANIFEST_INVALID'); for (const service of Object.keys(digestErrors)) console.log('HISTORICAL_' + service.toUpperCase() + '_DIGEST=' + manifest.images[service].digest);" "$historical_manifest" "$PROVENANCE_TEST_RELEASE_TAG" "$PROVENANCE_TEST_SOURCE_COMMIT" > "$stage/historical-images.env"
           source "$stage/historical-images.env"
-          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --service api --repository ghcr.io/pona-ekolo/pe-community-api --digest "$HISTORICAL_API_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --bundle "$stage/pe-community-api.attestation.jsonl" --service api --repository ghcr.io/pona-ekolo/pe-community-api --digest "$HISTORICAL_API_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
           echo "Historical ${PROVENANCE_TEST_RELEASE_TAG} API provenance: verified"
-          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --service web --repository ghcr.io/pona-ekolo/pe-community-web --digest "$HISTORICAL_WEB_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --bundle "$stage/pe-community-web.attestation.jsonl" --service web --repository ghcr.io/pona-ekolo/pe-community-web --digest "$HISTORICAL_WEB_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
           echo "Historical ${PROVENANCE_TEST_RELEASE_TAG} Web provenance: verified"
-          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --service worker --repository ghcr.io/pona-ekolo/pe-community-worker --digest "$HISTORICAL_WORKER_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
+          node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --bundle "$stage/pe-community-worker.attestation.jsonl" --service worker --repository ghcr.io/pona-ekolo/pe-community-worker --digest "$HISTORICAL_WORKER_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"
           echo "Historical ${PROVENANCE_TEST_RELEASE_TAG} Worker provenance: verified"
-          if node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --service api --repository ghcr.io/pona-ekolo/pe-community-web --digest "$HISTORICAL_API_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"; then
+          if node deploy/updater/verify-bundled-provenance.mjs --gh "$bundled_gh" --bundle "$stage/pe-community-api.attestation.jsonl" --service api --repository ghcr.io/pona-ekolo/pe-community-web --digest "$HISTORICAL_API_DIGEST" --release-tag "$PROVENANCE_TEST_RELEASE_TAG" --source-commit "$PROVENANCE_TEST_SOURCE_COMMIT"; then
             echo "PROVENANCE_POLICY_REPOSITORY_MISMATCH_NOT_REJECTED" >&2
             exit 1
           fi
@@ -357,7 +396,10 @@ jobs:
           name: supply-chain-release-${{ github.run_id }}
           path: |
             pe-community-update-manifest.json
-            pe-community-update-manifest.attestation.json
+            pe-community-update-manifest.attestation.jsonl
+            pe-community-api.attestation.jsonl
+            pe-community-web.attestation.jsonl
+            pe-community-worker.attestation.jsonl
             pe-community-updater-${{ needs.validate.outputs.build_version }}-linux-amd64.tar.gz
             pe-community-updater-${{ needs.validate.outputs.build_version }}-linux-arm64.tar.gz
           if-no-files-found: error

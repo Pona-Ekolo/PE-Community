@@ -7,6 +7,7 @@ const API_VERSION = '2022-11-28';
 const EXPECTED_REPOSITORY = 'Pona-Ekolo/PE-Community';
 const SEMVER_TAG = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const COMMIT_SHA = /^[a-f0-9]{40}$/;
+const VALIDATION_FIXTURE_TAG = 'v0.0.0';
 const PRODUCTION_RELEASE_POLICY = Object.freeze({
   repository: EXPECTED_REPOSITORY,
   tagPattern: SEMVER_TAG,
@@ -272,7 +273,10 @@ export async function publishReleaseDraft(api, input) {
     fail('RELEASE_TAG_INVALID');
   const expectedArtifacts = new Set([
     'pe-community-update-manifest.json',
-    'pe-community-update-manifest.attestation.json',
+    'pe-community-update-manifest.attestation.jsonl',
+    'pe-community-api.attestation.jsonl',
+    'pe-community-web.attestation.jsonl',
+    'pe-community-worker.attestation.jsonl',
     `pe-community-updater-${input.tag}-linux-amd64.tar.gz`,
     `pe-community-updater-${input.tag}-linux-arm64.tar.gz`,
   ]);
@@ -394,7 +398,7 @@ export class GitHubReleaseApi {
           name: input.name,
           draft: false,
           prerelease: false,
-          make_latest: 'true',
+          make_latest: input.tag === VALIDATION_FIXTURE_TAG ? 'false' : 'true',
         }),
       },
     );
@@ -424,7 +428,10 @@ async function main() {
 
   const names = [
     'pe-community-update-manifest.json',
-    'pe-community-update-manifest.attestation.json',
+    'pe-community-update-manifest.attestation.jsonl',
+    'pe-community-api.attestation.jsonl',
+    'pe-community-web.attestation.jsonl',
+    'pe-community-worker.attestation.jsonl',
     `pe-community-updater-${version}-linux-amd64.tar.gz`,
     `pe-community-updater-${version}-linux-arm64.tar.gz`,
   ];

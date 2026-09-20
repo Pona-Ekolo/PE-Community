@@ -1,4 +1,7 @@
 import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const services = Object.freeze({
   api: 'ghcr.io/pona-ekolo/pe-community-api',
@@ -7,6 +10,9 @@ const services = Object.freeze({
 });
 const options = parseArguments(process.argv.slice(2));
 
+const home = mkdtempSync(join(tmpdir(), 'pe-community-validation-'));
+mkdirSync(join(home, 'gh-config'), { mode: 0o700 });
+mkdirSync(join(home, 'docker-config'), { mode: 0o700 });
 try {
   execFileSync(
     options.gh,
@@ -14,6 +20,8 @@ try {
       'attestation',
       'verify',
       `oci://${services[options.service]}@${options.digest}`,
+      '--bundle',
+      options.bundle,
       '--repo',
       'Pona-Ekolo/PE-Community',
       '--hostname',
@@ -34,14 +42,25 @@ try {
       '--format',
       'json',
     ],
-    { env: process.env, stdio: ['ignore', 'ignore', 'inherit'] },
+    {
+      env: verifierEnvironment(home),
+      stdio: ['ignore', 'ignore', 'inherit'],
+    },
   );
 } catch {
   process.exitCode = 1;
+} finally {
+  rmSync(home, { recursive: true, force: true });
 }
 
 function parseArguments(argumentsList) {
-  const names = new Set(['--gh', '--service', '--digest', '--source-commit']);
+  const names = new Set([
+    '--gh',
+    '--bundle',
+    '--service',
+    '--digest',
+    '--source-commit',
+  ]);
   const values = {};
   for (let index = 0; index < argumentsList.length; index += 2) {
     const name = argumentsList[index];
@@ -60,8 +79,21 @@ function parseArguments(argumentsList) {
     throw new Error('Invalid bundled validation source commit.');
   return {
     gh: values['--gh'],
+    bundle: values['--bundle'],
     service: values['--service'],
     digest: values['--digest'],
     sourceCommit: values['--source-commit'],
+  };
+}
+
+function verifierEnvironment(home) {
+  return {
+    HOME: home,
+    GH_CONFIG_DIR: join(home, 'gh-config'),
+    DOCKER_CONFIG: join(home, 'docker-config'),
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    NO_COLOR: '1',
+    PATH: '/usr/bin:/bin',
   };
 }

@@ -7,7 +7,7 @@ import { GitHubReleaseProvider } from './release.js';
 
 const manifest = {
   schemaVersion: 2,
-  releaseContractVersion: 1,
+  releaseContractVersion: 2,
   version: 'v1.2.3',
   releaseTag: 'v1.2.3',
   sourceCommit: 'd'.repeat(40),
@@ -99,6 +99,7 @@ test('draft and prerelease releases are rejected before manifest verification', 
         verifierCalls += 1;
         return manifestVerifier.verify({
           payload: new Uint8Array(),
+          bundle: new Uint8Array([1]),
           releaseTag: 'v1.2.3',
           sourceCommit: manifest.sourceCommit,
         });
@@ -174,7 +175,7 @@ test('manifest redirects fail closed outside the allowlist', async () => {
   };
   await assert.rejects(
     () => releaseProvider(request as typeof fetch).target('v1.2.3'),
-    /RELEASE_MANIFEST_REDIRECT_INVALID/,
+    /RELEASE_ASSET_REDIRECT_INVALID/,
   );
 });
 
@@ -184,7 +185,7 @@ test('release discovery fails closed for transport, JSON, version, and schema fa
       releaseProvider((async () => {
         throw new Error('network unavailable');
       }) as typeof fetch).latest(),
-    /network unavailable/,
+    /RELEASE_DISCOVERY_FAILED/,
   );
   await assert.rejects(
     () =>
@@ -227,6 +228,103 @@ test('release discovery fails closed for transport, JSON, version, and schema fa
   );
 });
 
+test('release evidence inventory requires one manifest and all four JSONL bundles', async () => {
+  const cases = [
+    ['pe-community-update-manifest.json', 'RELEASE_MANIFEST_MISSING'],
+    [
+      'pe-community-update-manifest.attestation.jsonl',
+      'MANIFEST_BUNDLE_MISSING',
+    ],
+    ['pe-community-api.attestation.jsonl', 'IMAGE_BUNDLE_MISSING_API'],
+    ['pe-community-web.attestation.jsonl', 'IMAGE_BUNDLE_MISSING_WEB'],
+    ['pe-community-worker.attestation.jsonl', 'IMAGE_BUNDLE_MISSING_WORKER'],
+  ] as const;
+  for (const [missing, code] of cases) {
+    const request = (async () =>
+      jsonResponse({
+        tag_name: 'v1.2.3',
+        draft: false,
+        prerelease: false,
+        assets: releaseAssets().filter(({ name }) => name !== missing),
+      })) as typeof fetch;
+    await assert.rejects(
+      () => releaseProvider(request).target('v1.2.3'),
+      new RegExp(code),
+    );
+  }
+});
+
+test('legacy four-asset releases remain manual-only', async () => {
+  const assets = releaseAssets()
+    .filter(({ name }) => !name.endsWith('.attestation.jsonl'))
+    .concat({
+      name: 'pe-community-update-manifest.attestation.json',
+      browser_download_url:
+        'https://github.com/Pona-Ekolo/PE-Community/releases/download/v1.2.3/pe-community-update-manifest.attestation.json',
+    });
+  const request = (async () =>
+    jsonResponse({
+      tag_name: 'v1.2.3',
+      draft: false,
+      prerelease: false,
+      assets,
+    })) as typeof fetch;
+  await assert.rejects(
+    () => releaseProvider(request).target('v1.2.3'),
+    /LEGACY_RELEASE_MANUAL_REQUIRED/,
+  );
+});
+
+test('targeted verification accepts a valid permanent v0.0.0 fixture', async () => {
+  const release = await releaseProvider(
+    validationFixtureRequest() as typeof fetch,
+  ).target('v0.0.0');
+  assert.equal(release.version, 'v0.0.0');
+  assert.equal(release.manifest.releaseTag, 'v0.0.0');
+  assert.equal(release.manifest.releaseContractVersion, 2);
+});
+
+test('normal latest discovery rejects the permanent validation fixture', async () => {
+  await assert.rejects(
+    () => releaseProvider(validationFixtureRequest() as typeof fetch).latest(),
+    /VALIDATION_FIXTURE_NOT_INSTALLABLE/,
+  );
+});
+
+test('v0.0.0 remains fail-closed for legacy, malformed, unstable, and mismatched releases', async () => {
+  const legacyAssets = validationFixtureAssets()
+    .filter(({ name }) => !name.endsWith('.attestation.jsonl'))
+    .concat({
+      name: 'pe-community-update-manifest.attestation.json',
+      browser_download_url:
+        'https://github.com/Pona-Ekolo/PE-Community/releases/download/v0.0.0/pe-community-update-manifest.attestation.json',
+    });
+  for (const [options, code] of [
+    [{ assets: legacyAssets }, 'LEGACY_RELEASE_MANUAL_REQUIRED'],
+    [{ releaseTag: 'v0.0.0-rc.1' }, 'INVALID_VERSION'],
+    [{ draft: true }, 'RELEASE_NOT_STABLE'],
+    [{ prerelease: true }, 'RELEASE_NOT_STABLE'],
+    [
+      {
+        assets: validationFixtureAssets().filter(
+          ({ name }) => name !== 'pe-community-web.attestation.jsonl',
+        ),
+      },
+      'IMAGE_BUNDLE_MISSING_WEB',
+    ],
+    [{ releaseTag: 'v0.0.1' }, 'RELEASE_TAG_MISMATCH'],
+    [{ tagTarget: 'f'.repeat(40) }, 'MANIFEST_SOURCE_MISMATCH'],
+  ] as const) {
+    await assert.rejects(
+      () =>
+        releaseProvider(
+          validationFixtureRequest(options) as typeof fetch,
+        ).target('v0.0.0'),
+      new RegExp(code),
+    );
+  }
+});
+
 test('release provider requires an annotated tag bound to manifest source commit', async () => {
   const request = async (url: string | URL | Request) => {
     const value = String(url);
@@ -245,7 +343,7 @@ test('release provider requires an annotated tag bound to manifest source commit
   };
   await assert.rejects(
     () => releaseProvider(request as typeof fetch).target('v1.2.3'),
-    /MANIFEST_ATTESTATION_SOURCE_MISMATCH/,
+    /MANIFEST_SOURCE_MISMATCH/,
   );
 
   const lightweight = async (url: string | URL | Request) => {
@@ -299,6 +397,27 @@ test('release and manifest response bodies are bounded', async () => {
     () => releaseProvider(request as typeof fetch).target('v1.2.3'),
     /MANIFEST_TOO_LARGE/,
   );
+
+  const oversizedBundle = async (url: string | URL | Request) => {
+    const value = String(url);
+    if (value.includes('/releases/tags/'))
+      return jsonResponse({
+        tag_name: 'v1.2.3',
+        draft: false,
+        prerelease: false,
+        assets: releaseAssets(),
+      });
+    if (value.endsWith('/pe-community-update-manifest.json'))
+      return jsonResponse(manifest);
+    return new Response('x', {
+      status: 200,
+      headers: { 'content-length': String(4 * 1024 * 1024 + 1) },
+    });
+  };
+  await assert.rejects(
+    () => releaseProvider(oversizedBundle as typeof fetch).target('v1.2.3'),
+    /MANIFEST_BUNDLE_INVALID/,
+  );
 });
 
 function jsonResponse(value: unknown) {
@@ -317,10 +436,14 @@ function releaseAssets(
       browser_download_url: manifestUrl,
     },
     {
-      name: 'pe-community-update-manifest.attestation.json',
+      name: 'pe-community-update-manifest.attestation.jsonl',
       browser_download_url:
-        'https://github.com/Pona-Ekolo/PE-Community/releases/download/v1.2.3/pe-community-update-manifest.attestation.json',
+        'https://github.com/Pona-Ekolo/PE-Community/releases/download/v1.2.3/pe-community-update-manifest.attestation.jsonl',
     },
+    ...(['api', 'web', 'worker'] as const).map((service) => ({
+      name: `pe-community-${service}.attestation.jsonl`,
+      browser_download_url: `https://github.com/Pona-Ekolo/PE-Community/releases/download/v1.2.3/pe-community-${service}.attestation.jsonl`,
+    })),
     {
       name: 'pe-community-updater-v1.2.3-linux-amd64.tar.gz',
       browser_download_url:
@@ -332,6 +455,60 @@ function releaseAssets(
         'https://github.com/Pona-Ekolo/PE-Community/releases/download/v1.2.3/pe-community-updater-v1.2.3-linux-arm64.tar.gz',
     },
   ];
+}
+
+function validationFixtureManifest() {
+  return {
+    ...manifest,
+    version: 'v0.0.0',
+    releaseTag: 'v0.0.0',
+    supplyChain: { attestationPolicy: 'GITHUB_PROVENANCE_REQUIRED' },
+  };
+}
+
+function validationFixtureAssets() {
+  return releaseAssets().map((asset) => ({
+    ...asset,
+    name: asset.name.replaceAll('v1.2.3', 'v0.0.0'),
+    browser_download_url: asset.browser_download_url.replaceAll(
+      'v1.2.3',
+      'v0.0.0',
+    ),
+  }));
+}
+
+function validationFixtureRequest(
+  options: {
+    assets?: ReturnType<typeof validationFixtureAssets>;
+    draft?: boolean;
+    prerelease?: boolean;
+    releaseTag?: string;
+    tagTarget?: string;
+  } = {},
+) {
+  const fixture = validationFixtureManifest();
+  return async (url: string | URL | Request) => {
+    const value = String(url);
+    if (value.includes('/releases/tags/') || value.endsWith('/releases/latest'))
+      return jsonResponse({
+        tag_name: options.releaseTag ?? 'v0.0.0',
+        draft: options.draft ?? false,
+        prerelease: options.prerelease ?? false,
+        assets: options.assets ?? validationFixtureAssets(),
+      });
+    if (value.includes('/git/ref/tags/'))
+      return jsonResponse({ object: { type: 'tag', sha: 'e'.repeat(40) } });
+    if (value.includes('/git/tags/'))
+      return jsonResponse({
+        object: {
+          type: 'commit',
+          sha: options.tagTarget ?? fixture.sourceCommit,
+        },
+      });
+    if (value.endsWith('/pe-community-update-manifest.json'))
+      return jsonResponse(fixture);
+    return new Response('{}', { status: 200 });
+  };
 }
 
 const manifestVerifier: ManifestAttestationVerifier = {

@@ -54,8 +54,11 @@ export async function runCli(
     else printHuman(verification, dependencies.output);
     return 0;
   } catch (error) {
+    const code = errorCode(error);
     dependencies.output.error(
-      `Release verification failed: ${errorCode(error)}`,
+      parsed.json
+        ? JSON.stringify({ ok: false, code })
+        : `Release verification failed: ${code}`,
     );
     return 1;
   }
@@ -143,6 +146,14 @@ function jsonOutput(verification: ReleaseVerification) {
 }
 
 function errorCode(error: unknown) {
+  if (
+    error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof error.code === 'string' &&
+    /^[A-Z][A-Z0-9_]{2,100}$/.test(error.code)
+  )
+    return error.code;
   if (error instanceof Error && /^[A-Z][A-Z0-9_]{2,100}$/.test(error.message))
     return error.message;
   return 'RELEASE_VERIFICATION_FAILED';

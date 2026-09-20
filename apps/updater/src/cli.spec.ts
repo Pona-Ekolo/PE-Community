@@ -8,7 +8,7 @@ import type { AgentRelease, ReleaseProvider } from './release.js';
 const sourceCommit = 'a'.repeat(40);
 const manifest: ReleaseManifest = {
   schemaVersion: 2,
-  releaseContractVersion: 1,
+  releaseContractVersion: 2,
   version: 'v1.2.7',
   releaseTag: 'v1.2.7',
   channel: 'stable',
@@ -46,10 +46,28 @@ test('verify-release reports only authenticated immutable release metadata', asy
   assert.deepEqual(JSON.parse(output.lines[0] ?? '{}'), {
     release: 'v1.2.7',
     sourceCommit,
-    releaseContractVersion: 1,
+    releaseContractVersion: 2,
     policy: { strategy: 'FORWARD_ONLY', requiresManualAction: false },
     images: manifest.images,
   });
+  assert.equal(output.errors.length, 0);
+});
+
+test('verify-release permits the reserved validation fixture without making it installable', async () => {
+  const fixtureManifest = {
+    ...manifest,
+    version: 'v0.0.0',
+    releaseTag: 'v0.0.0',
+  } satisfies ReleaseManifest;
+  const output = outputCollector();
+  const code = await runCli(['verify-release', 'v0.0.0', '--json'], {
+    releases: releaseProvider(fixtureManifest),
+    provenance: provenanceVerifier(),
+    output,
+    writePlan: noPlanWrite,
+  });
+  assert.equal(code, 0);
+  assert.equal(JSON.parse(output.lines[0] ?? '{}').release, 'v0.0.0');
   assert.equal(output.errors.length, 0);
 });
 
@@ -125,6 +143,22 @@ test('verify-release fails closed for manifest, image provenance, and manual-act
   }
 });
 
+test('verify-release emits a stable credential-free JSON failure', async () => {
+  const output = outputCollector();
+  const code = await runCli(['verify-release', 'v1.2.7', '--json'], {
+    releases: rejectingReleaseProvider('MANIFEST_BUNDLE_INVALID'),
+    provenance: provenanceVerifier(),
+    output,
+    writePlan: noPlanWrite,
+  });
+  assert.equal(code, 1);
+  assert.deepEqual(output.lines, []);
+  assert.deepEqual(JSON.parse(output.errors[0] ?? '{}'), {
+    ok: false,
+    code: 'MANIFEST_BUNDLE_INVALID',
+  });
+});
+
 test('verify-release does not require updater configuration, IPC, Docker, or systemd', async () => {
   const output = outputCollector();
   const calls: string[] = [];
@@ -139,7 +173,7 @@ test('verify-release does not require updater configuration, IPC, Docker, or sys
 });
 
 function releaseProvider(
-  overrides: Partial<ReleaseManifest> | string[] = {},
+  overrides: Partial<ReleaseManifest> | ReleaseManifest | string[] = {},
 ): ReleaseProvider {
   const calls = Array.isArray(overrides) ? overrides : null;
   const value = calls ? manifest : { ...manifest, ...overrides };
@@ -172,6 +206,7 @@ function release(value: ReleaseManifest): AgentRelease {
     publishedAt: '2026-09-08T00:00:00Z',
     notes: '',
     manifest: value,
+    imageBundles: testImageBundles(),
     manifestProvenance: {
       service: 'manifest',
       digest: `sha256:${'0'.repeat(64)}`,
@@ -182,6 +217,14 @@ function release(value: ReleaseManifest): AgentRelease {
       workflow: '.github/workflows/publish-images.yml',
       result: 'VERIFIED',
     },
+  };
+}
+
+function testImageBundles() {
+  return {
+    api: new Uint8Array([1]),
+    web: new Uint8Array([2]),
+    worker: new Uint8Array([3]),
   };
 }
 

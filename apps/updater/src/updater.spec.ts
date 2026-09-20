@@ -1,11 +1,22 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import type { UpdaterConfig } from './config.js';
-import { ALLOWED_IMAGE_REPOSITORIES, type ReleaseManifest, type UpdateRun } from './domain.js';
+import {
+  ALLOWED_IMAGE_REPOSITORIES,
+  type ReleaseManifest,
+  type UpdateRun,
+} from './domain.js';
 import { ProcessCommandExecutor, type CommandExecutor } from './executor.js';
 import type { AgentRelease, ReleaseProvider } from './release.js';
 import type { ProvenanceVerifier } from './provenance.js';
@@ -15,7 +26,7 @@ import { isManagedBackupName, UpdaterAgent } from './updater.js';
 
 const manifest: ReleaseManifest = {
   schemaVersion: 2,
-  releaseContractVersion: 1,
+  releaseContractVersion: 2,
   version: 'v1.1.0',
   channel: 'stable',
   minimumVersion: 'v1.0.0',
@@ -23,9 +34,18 @@ const manifest: ReleaseManifest = {
   releaseTag: 'v1.1.0',
   sourceCommit: 'd'.repeat(40),
   images: {
-    api: { repository: ALLOWED_IMAGE_REPOSITORIES.api, digest: `sha256:${'a'.repeat(64)}` },
-    web: { repository: ALLOWED_IMAGE_REPOSITORIES.web, digest: `sha256:${'b'.repeat(64)}` },
-    worker: { repository: ALLOWED_IMAGE_REPOSITORIES.worker, digest: `sha256:${'c'.repeat(64)}` },
+    api: {
+      repository: ALLOWED_IMAGE_REPOSITORIES.api,
+      digest: `sha256:${'a'.repeat(64)}`,
+    },
+    web: {
+      repository: ALLOWED_IMAGE_REPOSITORIES.web,
+      digest: `sha256:${'b'.repeat(64)}`,
+    },
+    worker: {
+      repository: ALLOWED_IMAGE_REPOSITORIES.worker,
+      digest: `sha256:${'c'.repeat(64)}`,
+    },
   },
   database: { migrationCompatibility: 'BACKWARD_COMPATIBLE' },
   supplyChain: { attestationPolicy: 'GITHUB_PROVENANCE_REQUIRED' },
@@ -35,7 +55,11 @@ const manifest: ReleaseManifest = {
 test('invalid install input is rejected as a client error before execution', async () => {
   const fixture = await fixtureAgent();
   await assert.rejects(
-    () => fixture.agent.install({ version: 'latest', idempotencyKey: 'valid-idempotency-key' }),
+    () =>
+      fixture.agent.install({
+        version: 'latest',
+        idempotencyKey: 'valid-idempotency-key',
+      }),
     (error: unknown) =>
       error instanceof Error &&
       'code' in error &&
@@ -45,10 +69,34 @@ test('invalid install input is rejected as a client error before execution', asy
   );
 });
 
+test('the permanent validation fixture can never become an installation target', async () => {
+  const fixture = await fixtureAgent();
+  await assert.rejects(
+    () =>
+      fixture.agent.install({
+        version: 'v0.0.0',
+        idempotencyKey: 'validation-fixture-key',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'VALIDATION_FIXTURE_NOT_INSTALLABLE' &&
+      'status' in error &&
+      error.status === 400,
+  );
+  assert.equal(fixture.executor.calls.length, 0);
+});
+
 test('duplicate install idempotency key returns the same run and never starts a second execution', async () => {
   const fixture = await fixtureAgent();
-  const first = await fixture.agent.install({ version: 'v1.1.0', idempotencyKey: 'test-idempotency-key' });
-  const second = await fixture.agent.install({ version: 'v1.1.0', idempotencyKey: 'test-idempotency-key' });
+  const first = await fixture.agent.install({
+    version: 'v1.1.0',
+    idempotencyKey: 'test-idempotency-key',
+  });
+  const second = await fixture.agent.install({
+    version: 'v1.1.0',
+    idempotencyKey: 'test-idempotency-key',
+  });
   assert.equal(second.id, first.id);
   await waitForTerminal(fixture.store, first.id);
 });
@@ -73,12 +121,30 @@ test('a distinct concurrent install is rejected by the host lock', async () => {
 
 test('agent executes only fixed docker argv and completes fake update', async () => {
   const fixture = await fixtureAgent();
-  const run = await fixture.agent.install({ version: 'v1.1.0', idempotencyKey: 'another-test-key' });
+  const run = await fixture.agent.install({
+    version: 'v1.1.0',
+    idempotencyKey: 'another-test-key',
+  });
   const completed = await waitForTerminal(fixture.store, run.id);
-  assert.equal(completed.status, 'COMPLETED', `${completed.failureCode}: ${completed.failureSummary}`);
-  assert.ok(fixture.executor.calls.some((call) => call.args.includes('migrate') && call.args.includes('deploy')));
-  assert.ok(fixture.executor.calls.every((call) => call.executable === 'docker'));
-  assert.equal((await readFile(fixture.config.envFile, 'utf8')).match(/PE_COMMUNITY_VERSION="v1.1.0"/)?.[0], 'PE_COMMUNITY_VERSION="v1.1.0"');
+  assert.equal(
+    completed.status,
+    'COMPLETED',
+    `${completed.failureCode}: ${completed.failureSummary}`,
+  );
+  assert.ok(
+    fixture.executor.calls.some(
+      (call) => call.args.includes('migrate') && call.args.includes('deploy'),
+    ),
+  );
+  assert.ok(
+    fixture.executor.calls.every((call) => call.executable === 'docker'),
+  );
+  assert.equal(
+    (await readFile(fixture.config.envFile, 'utf8')).match(
+      /PE_COMMUNITY_VERSION="v1.1.0"/,
+    )?.[0],
+    'PE_COMMUNITY_VERSION="v1.1.0"',
+  );
 });
 
 test('idempotency lookup survives later completed runs', async () => {
@@ -89,7 +155,10 @@ test('idempotency lookup survives later completed runs', async () => {
   const second = completedRun('newer-idempotency-key');
   await store.saveRun(first);
   await store.saveRun(second);
-  assert.equal((await store.findByIdempotencyKey(first.idempotencyKey))?.id, first.id);
+  assert.equal(
+    (await store.findByIdempotencyKey(first.idempotencyKey))?.id,
+    first.id,
+  );
 });
 
 test('health checks reject a service without a healthy Compose state', async () => {
@@ -122,18 +191,21 @@ test('preflight fails closed for disk, Docker, and Compose failures', async () =
 
   const docker = await fixtureAgent();
   docker.executor.failureArguments = ['info'];
-  await assert.rejects(() => docker.agent.checkPreflight(), /Injected command failure/);
+  await assert.rejects(
+    () => docker.agent.checkPreflight(),
+    /Injected command failure/,
+  );
 
   const compose = await fixtureAgent();
   compose.executor.failureArguments = ['compose', 'version'];
-  await assert.rejects(() => compose.agent.checkPreflight(), /Injected command failure/);
+  await assert.rejects(
+    () => compose.agent.checkPreflight(),
+    /Injected command failure/,
+  );
 });
 
 test('dependency readiness fails closed for PostgreSQL and Redis', async () => {
-  for (const argumentsToFail of [
-    ['pg_isready'],
-    ['redis-cli', 'ping'],
-  ]) {
+  for (const argumentsToFail of [['pg_isready'], ['redis-cli', 'ping']]) {
     const fixture = await fixtureAgent();
     fixture.executor.failureArguments = argumentsToFail;
     await assert.rejects(
@@ -147,12 +219,20 @@ test('backup capture resolves only after the complete output file is closed', as
   const root = await mkdtemp(join(tmpdir(), 'pe-updater-capture-test-'));
   const outputPath = join(root, 'capture.bin');
   const expectedSize = 2 * 1024 * 1024;
-  await new ProcessCommandExecutor().capture(process.execPath, ['-e', `process.stdout.write(Buffer.alloc(${expectedSize}, 97))`], outputPath, { timeoutMs: 10_000 });
+  await new ProcessCommandExecutor().capture(
+    process.execPath,
+    ['-e', `process.stdout.write(Buffer.alloc(${expectedSize}, 97))`],
+    outputPath,
+    { timeoutMs: 10_000 },
+  );
   assert.equal((await readFile(outputPath)).length, expectedSize);
 });
 
 test('backup retention recognizes only updater-owned directory names', () => {
-  assert.equal(isManagedBackupName(`2026-08-30T01-02-03-004Z-${randomUUID()}`), true);
+  assert.equal(
+    isManagedBackupName(`2026-08-30T01-02-03-004Z-${randomUUID()}`),
+    true,
+  );
   assert.equal(isManagedBackupName('operator-manual-backup'), false);
   assert.equal(isManagedBackupName('../outside'), false);
 });
@@ -244,7 +324,13 @@ test('cancellation is accepted only in declared safe phases and denied once migr
     assert.equal(cancelled.cancellationRequested, true, phase);
   }
 
-  for (const phase of ['BACKUP', 'VERIFYING', 'MIGRATING', 'DEPLOYING', 'HEALTHCHECK'] as const) {
+  for (const phase of [
+    'BACKUP',
+    'VERIFYING',
+    'MIGRATING',
+    'DEPLOYING',
+    'HEALTHCHECK',
+  ] as const) {
     const run = activeRun(phase);
     await fixture.store.saveRun(run);
     await assert.rejects(
@@ -335,16 +421,34 @@ test('provenance failure stops after pull and before migration or deployment', a
   const failed = await waitForTerminal(fixture.store, run.id);
   assert.equal(failed.status, 'FAILED');
   assert.equal(failed.failureCode, 'PROVENANCE_SIGNATURE_INVALID');
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('pull')), true);
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('migrate')), false);
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('up')), false);
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('pull')),
+    true,
+  );
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('migrate')),
+    false,
+  );
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('up')),
+    false,
+  );
   assert.match(await readFile(fixture.config.envFile, 'utf8'), /v1\.0\.0/);
   const events = await fixture.store.events(run.id);
-  assert.ok(events.some((event) => event.eventCode === 'SYSTEM_UPDATE_PROVENANCE_VERIFICATION_FAILED'));
+  assert.ok(
+    events.some(
+      (event) =>
+        event.eventCode === 'SYSTEM_UPDATE_PROVENANCE_VERIFICATION_FAILED',
+    ),
+  );
 });
 
 test('manifest attestation failure stops before image pull or deployment mutation', async () => {
-  const fixture = await fixtureAgent(true, manifest, new Error('MANIFEST_ATTESTATION_INVALID'));
+  const fixture = await fixtureAgent(
+    true,
+    manifest,
+    new Error('MANIFEST_ATTESTATION_INVALID'),
+  );
   const run = await fixture.agent.install({
     version: 'v1.1.0',
     idempotencyKey: `manifest-attestation-failure-${randomUUID()}`,
@@ -352,9 +456,18 @@ test('manifest attestation failure stops before image pull or deployment mutatio
   const failed = await waitForTerminal(fixture.store, run.id);
   assert.equal(failed.status, 'FAILED');
   assert.equal(failed.failureCode, 'MANIFEST_ATTESTATION_INVALID');
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('pull')), false);
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('migrate')), false);
-  assert.equal(fixture.executor.calls.some((call) => call.args.includes('up')), false);
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('pull')),
+    false,
+  );
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('migrate')),
+    false,
+  );
+  assert.equal(
+    fixture.executor.calls.some((call) => call.args.includes('up')),
+    false,
+  );
 });
 
 async function fixtureAgent(
@@ -366,14 +479,38 @@ async function fixtureAgent(
   const deploymentRoot = join(root, 'deployment');
   const stateDir = join(root, 'state');
   const backupRoot = join(root, 'backups');
-  await Promise.all([mkdir(join(deploymentRoot, 'deploy'), { recursive: true }), mkdir(stateDir), mkdir(backupRoot)]);
+  await Promise.all([
+    mkdir(join(deploymentRoot, 'deploy'), { recursive: true }),
+    mkdir(stateDir),
+    mkdir(backupRoot),
+  ]);
   const envFile = join(deploymentRoot, '.env');
   const composeFile = join(deploymentRoot, 'docker-compose.prod.yml');
   const caddyFile = join(deploymentRoot, 'deploy', 'Caddyfile');
-  await writeFile(envFile, 'PE_COMMUNITY_VERSION="v1.0.0"\nPOSTGRES_PASSWORD=x\nJWT_SECRET=x\nPASSWORD_PEPPER=x\nEMAIL_ENCRYPTION_KEY=x\nWEB_ORIGIN=https://example.test\n');
+  await writeFile(
+    envFile,
+    'PE_COMMUNITY_VERSION="v1.0.0"\nPOSTGRES_PASSWORD=x\nJWT_SECRET=x\nPASSWORD_PEPPER=x\nEMAIL_ENCRYPTION_KEY=x\nWEB_ORIGIN=https://example.test\n',
+  );
   await writeFile(composeFile, 'services: {}\n');
   await writeFile(caddyFile, ':80 {}\n');
-  const config: UpdaterConfig = { updaterRoot: root, deploymentRoot, stateDir, backupRoot, envFile, composeFile, composeOverrideFile: null, caddyFile, socketPath: join(root, 'updater.sock'), sharedSecret: 'x'.repeat(32), previousSharedSecret: null, minimumFreeBytes: 1, backupRetention: 5, publicApiHealthUrl: 'https://example.test/health', publicWebHealthUrl: 'https://example.test/login', topology: 'single-host' };
+  const config: UpdaterConfig = {
+    updaterRoot: root,
+    deploymentRoot,
+    stateDir,
+    backupRoot,
+    envFile,
+    composeFile,
+    composeOverrideFile: null,
+    caddyFile,
+    socketPath: join(root, 'updater.sock'),
+    sharedSecret: 'x'.repeat(32),
+    previousSharedSecret: null,
+    minimumFreeBytes: 1,
+    backupRetention: 5,
+    publicApiHealthUrl: 'https://example.test/health',
+    publicWebHealthUrl: 'https://example.test/login',
+    topology: 'single-host',
+  };
   const store = new AgentStore(stateDir);
   const executor = new FakeExecutor(releaseManifest);
   const release: AgentRelease = {
@@ -382,6 +519,11 @@ async function fixtureAgent(
     publishedAt: new Date(0).toISOString(),
     notes: 'Test',
     manifest: releaseManifest,
+    imageBundles: {
+      api: new Uint8Array([1]),
+      web: new Uint8Array([2]),
+      worker: new Uint8Array([3]),
+    },
     manifestProvenance: verifiedManifestProvenance(),
   };
   const releases: ReleaseProvider = {
@@ -392,7 +534,14 @@ async function fixtureAgent(
     },
   };
   const provenance = new FakeProvenanceVerifier();
-  const agent = new TestUpdaterAgent(config, store, executor, releases, ALLOWED_IMAGE_REPOSITORIES, provenance);
+  const agent = new TestUpdaterAgent(
+    config,
+    store,
+    executor,
+    releases,
+    ALLOWED_IMAGE_REPOSITORIES,
+    provenance,
+  );
   if (initialize) await agent.initialize();
   return { agent, store, executor, provenance, config };
 }
@@ -423,30 +572,50 @@ class FakeExecutor implements CommandExecutor {
       this.failureArguments.length &&
       this.failureArguments.every((argument) => args.includes(argument))
     ) {
-      throw new Error(`Injected command failure: ${this.failureArguments.join(' ')}`);
+      throw new Error(
+        `Injected command failure: ${this.failureArguments.join(' ')}`,
+      );
     }
     if (args.includes('image') && args.includes('inspect')) {
       const reference = args[2];
-      const service = reference.includes('-api:') ? 'api' : reference.includes('-web:') ? 'web' : 'worker';
+      const service = reference.includes('-api:')
+        ? 'api'
+        : reference.includes('-web:')
+          ? 'web'
+          : 'worker';
       const digest = this.digestMismatch
         ? `sha256:${'f'.repeat(64)}`
         : this.releaseManifest.images[service].digest;
-      return { stdout: JSON.stringify([`${ALLOWED_IMAGE_REPOSITORIES[service]}@${digest}`]), stderr: '' };
+      return {
+        stdout: JSON.stringify([
+          `${ALLOWED_IMAGE_REPOSITORIES[service]}@${digest}`,
+        ]),
+        stderr: '',
+      };
     }
-    if (args.includes('ps') && args.includes('--format') && args.at(-2) === 'json') {
+    if (
+      args.includes('ps') &&
+      args.includes('--format') &&
+      args.at(-2) === 'json'
+    ) {
       const service = String(args.at(-1));
       return {
-        stdout: this.unhealthyService !== service
-          ? JSON.stringify([
-              { Service: service, State: 'running', Health: 'healthy' },
-            ])
-          : '',
+        stdout:
+          this.unhealthyService !== service
+            ? JSON.stringify([
+                { Service: service, State: 'running', Health: 'healthy' },
+              ])
+            : '',
         stderr: '',
       };
     }
     return { stdout: '{}', stderr: '' };
   }
-  async capture(_executable: string, _args: readonly string[], outputPath: string) {
+  async capture(
+    _executable: string,
+    _args: readonly string[],
+    outputPath: string,
+  ) {
     if (this.captureFailure) throw new Error('Injected backup failure');
     await writeFile(outputPath, 'fake pg dump');
     return { stderr: '' };
@@ -455,7 +624,9 @@ class FakeExecutor implements CommandExecutor {
 
 class FakeProvenanceVerifier implements ProvenanceVerifier {
   failureCode: string | null = null;
-  async preflight() { return '2.98.0'; }
+  async preflight() {
+    return '2.98.0';
+  }
   async verify(input: Parameters<ProvenanceVerifier['verify']>[0]) {
     if (this.failureCode) throw new ProvenanceError(this.failureCode);
     return {
@@ -473,9 +644,15 @@ class FakeProvenanceVerifier implements ProvenanceVerifier {
 
 class TestUpdaterAgent extends UpdaterAgent {
   unhealthyVersion: string | null = null;
-  protected override async retry(operation: () => Promise<unknown>) { return operation(); }
-  checkHealth(targetVersion: string) { return super.healthChecks(targetVersion); }
-  checkPreflight() { return super.preflight(); }
+  protected override async retry(operation: () => Promise<unknown>) {
+    return operation();
+  }
+  checkHealth(targetVersion: string) {
+    return super.healthChecks(targetVersion);
+  }
+  checkPreflight() {
+    return super.preflight();
+  }
   protected override async healthChecks(targetVersion: string) {
     if (targetVersion === this.unhealthyVersion)
       throw new Error(`Injected unhealthy version: ${targetVersion}`);
@@ -486,7 +663,16 @@ class TestUpdaterAgent extends UpdaterAgent {
 async function waitForTerminal(store: AgentStore, id: string) {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const run = await store.loadRun(id);
-    if (run && ['COMPLETED', 'FAILED', 'MANUAL_INTERVENTION_REQUIRED', 'CANCELLED'].includes(run.status)) return run;
+    if (
+      run &&
+      [
+        'COMPLETED',
+        'FAILED',
+        'MANUAL_INTERVENTION_REQUIRED',
+        'CANCELLED',
+      ].includes(run.status)
+    )
+      return run;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error('Fake update did not finish.');

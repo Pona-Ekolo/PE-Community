@@ -18,9 +18,24 @@ const artifacts = [
     digest: `sha256:${'a'.repeat(64)}`,
   },
   {
-    name: 'pe-community-update-manifest.attestation.json',
+    name: 'pe-community-update-manifest.attestation.jsonl',
     size: 20,
     digest: `sha256:${'b'.repeat(64)}`,
+  },
+  {
+    name: 'pe-community-api.attestation.jsonl',
+    size: 21,
+    digest: `sha256:${'e'.repeat(64)}`,
+  },
+  {
+    name: 'pe-community-web.attestation.jsonl',
+    size: 22,
+    digest: `sha256:${'f'.repeat(64)}`,
+  },
+  {
+    name: 'pe-community-worker.attestation.jsonl',
+    size: 23,
+    digest: `sha256:${'0'.repeat(64)}`,
   },
   {
     name: `pe-community-updater-${tag}-linux-amd64.tar.gz`,
@@ -34,6 +49,17 @@ const artifacts = [
   },
 ];
 const input = { repository, tag, sourceCommit, artifacts };
+
+function validationFixtureInput() {
+  return {
+    ...input,
+    tag: 'v0.0.0',
+    artifacts: artifacts.map((artifact) => ({
+      ...artifact,
+      name: artifact.name.replaceAll(tag, 'v0.0.0'),
+    })),
+  };
+}
 
 function asset(artifact, id) {
   return {
@@ -105,11 +131,11 @@ class FakeApi {
     );
   }
 
-  async publishRelease(id) {
+  async publishRelease(id, publishInput) {
     this.calls.push(`publish:${id}`);
     const release = this.releases.find((candidate) => candidate.id === id);
     release.draft = false;
-    release.html_url = `https://github.com/Pona-Ekolo/PE-Community/releases/tag/${tag}`;
+    release.html_url = `https://github.com/Pona-Ekolo/PE-Community/releases/tag/${publishInput.tag}`;
     return structuredClone(release);
   }
 }
@@ -197,6 +223,53 @@ test('creates, rediscovers, fills, validates, and publishes a new draft by relea
     artifacts.length,
   );
   assert.ok(api.calls.includes('publish:100'));
+});
+
+test('publishes the validation fixture through the same exact seven-asset draft-first path', async () => {
+  const fixtureInput = validationFixtureInput();
+  const api = new FakeApi();
+  const result = await publishReleaseDraft(api, fixtureInput);
+  assert.equal(result.tag_name, 'v0.0.0');
+  assert.equal(result.draft, false);
+  assert.equal(fixtureInput.artifacts.length, 7);
+  assert.deepEqual(
+    fixtureInput.artifacts.map(({ name }) => name),
+    [
+      'pe-community-update-manifest.json',
+      'pe-community-update-manifest.attestation.jsonl',
+      'pe-community-api.attestation.jsonl',
+      'pe-community-web.attestation.jsonl',
+      'pe-community-worker.attestation.jsonl',
+      'pe-community-updater-v0.0.0-linux-amd64.tar.gz',
+      'pe-community-updater-v0.0.0-linux-arm64.tar.gz',
+    ],
+  );
+  assert.equal(api.calls[0], 'list');
+  assert.equal(api.calls[1], 'create');
+  assert.equal(
+    api.calls.filter((call) => call.startsWith('upload:')).length,
+    7,
+  );
+  assert.ok(api.calls.includes('publish:100'));
+});
+
+test('marks only the permanent validation fixture as non-latest', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: String(url), body: JSON.parse(init.body) });
+    return new Response('{}', { status: 200 });
+  };
+  const api = new GitHubReleaseApi(repository, 'test-token', fetchImpl);
+  await api.publishRelease(41, {
+    tag: 'v0.0.0',
+    sourceCommit,
+    name: 'v0.0.0',
+  });
+  await api.publishRelease(42, { tag, sourceCommit, name: tag });
+  assert.equal(calls[0].body.make_latest, 'false');
+  assert.equal(calls[0].body.draft, false);
+  assert.equal(calls[0].body.prerelease, false);
+  assert.equal(calls[1].body.make_latest, 'true');
 });
 
 test('uses the created draft ID rather than its temporary untagged URL', async () => {
@@ -328,7 +401,7 @@ test('rerun after partial upload does not duplicate the release or exact assets'
   assert.equal(api.calls.includes('create'), false);
   assert.deepEqual(
     api.calls.filter((call) => call.startsWith('upload:')),
-    [`upload:${artifacts[2].name}`, `upload:${artifacts[3].name}`],
+    artifacts.slice(2).map(({ name }) => `upload:${name}`),
   );
   assert.equal(
     new Set(api.releases[0].assets.map(({ name }) => name)).size,
