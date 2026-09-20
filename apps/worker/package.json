@@ -18,7 +18,7 @@
     "@types/nodemailer": "^8.0.1",
     "bullmq": "^5.34.1",
     "ioredis": "^5.4.2",
-    "nodemailer": "^9.0.5"
+    "nodemailer": "^9.1.1"
   },
   "devDependencies": {
     "tsx": "^4.23.12",
